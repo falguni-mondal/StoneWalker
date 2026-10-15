@@ -1,0 +1,256 @@
+/**
+ * STONEWALKER — Technology Tree (Section 13)
+ * 20 technologies across 3 ages (Stone, Bone, Bronze) in 4 clear branches:
+ * Gathering, Building, Military, and Machines.
+ */
+
+import type { TechDefinition } from './types';
+
+export const TECHS: Record<string, TechDefinition> = {
+  // ==========================================================================
+  // BRANCH 1: GATHERING (5 Techs)
+  // ==========================================================================
+  flint_tools: {
+    id: 'flint_tools',
+    name: 'Flint Harvesting Tools',
+    age: 'stone',
+    branch: 'gathering',
+    description: 'Increases all Worker gathering speed by +15%.',
+    cost: { food: 80, stone: 60 },
+    researchTime: 15,
+    effect: { type: 'gather_speed', value: 0.15 },
+  },
+  woven_baskets: {
+    id: 'woven_baskets',
+    name: 'Woven Reed Baskets',
+    age: 'stone',
+    branch: 'gathering',
+    description: 'Workers carry +5 additional resource units per trip (10 -> 15).',
+    cost: { food: 70, wood: 80 },
+    researchTime: 16,
+    prerequisite: 'flint_tools',
+    effect: { type: 'carry_capacity', value: 5 },
+  },
+  bone_chisels: {
+    id: 'bone_chisels',
+    name: 'Bone Wedges & Saws',
+    age: 'bone',
+    branch: 'gathering',
+    description: 'Increases all Worker gathering speed by an additional +20%.',
+    cost: { food: 120, wood: 100, stone: 90 },
+    researchTime: 22,
+    prerequisite: 'woven_baskets',
+    effect: { type: 'gather_speed', value: 0.2 },
+  },
+  bronze_smelting: {
+    id: 'bronze_smelting',
+    name: 'Bronze Ore Smelting',
+    age: 'bronze',
+    branch: 'gathering',
+    description: 'Unlocks the Bronze Smeltery building to harvest Bronze Ore veins.',
+    cost: { wood: 160, stone: 160, hide: 60 },
+    researchTime: 25,
+    prerequisite: 'bone_chisels',
+    effect: { type: 'unlock_building', target: 'bronze_mine', value: 1 },
+  },
+  pack_harnesses: {
+    id: 'pack_harnesses',
+    name: 'Bronze-Buckled PackFrames',
+    age: 'bronze',
+    branch: 'gathering',
+    description: 'Workers carry +5 more resources per trip (15 -> 20) and gather +15% faster.',
+    cost: { food: 150, hide: 100, bronze: 60 },
+    researchTime: 28,
+    prerequisite: 'bronze_smelting',
+    effect: { type: 'carry_capacity', value: 5 },
+  },
+
+  // ==========================================================================
+  // BRANCH 2: BUILDING & BASE (5 Techs)
+  // ==========================================================================
+  lashed_timbers: {
+    id: 'lashed_timbers',
+    name: 'Sinew-Lashed Timbers',
+    age: 'stone',
+    branch: 'building',
+    description: 'Increases max HP of all camp buildings by +20%.',
+    cost: { wood: 100, hide: 40 },
+    researchTime: 15,
+    effect: { type: 'building_hp', value: 0.2 },
+  },
+  totem_awakening: {
+    id: 'totem_awakening',
+    name: 'Totem Awakening',
+    age: 'stone',
+    branch: 'building',
+    description: 'Unlocks the Rally Roar Spirit Power at your Spirit Totem.',
+    cost: { food: 100, stone: 90 },
+    researchTime: 18,
+    prerequisite: 'lashed_timbers',
+    effect: { type: 'unlock_power', target: 'rally_roar', value: 1 },
+  },
+  bone_walker_frame: {
+    id: 'bone_walker_frame',
+    name: 'Bone-Crowned Walker Tier',
+    age: 'bone',
+    branch: 'building',
+    description: 'Allows upgrading the Council Walker Base to Tier 2 and raises building caps.',
+    cost: { wood: 220, stone: 200, hide: 90 },
+    researchTime: 28,
+    prerequisite: 'totem_awakening',
+    effect: { type: 'base_upgrade', value: 2 },
+  },
+  sky_fire_ritual: {
+    id: 'sky_fire_ritual',
+    name: 'Sky-Fire Ritual',
+    age: 'bone',
+    branch: 'building',
+    description: 'Unlocks the Fire Rain Spirit Power at your Spirit Totem.',
+    cost: { food: 140, stone: 130, hide: 70 },
+    researchTime: 24,
+    prerequisite: 'bone_walker_frame',
+    effect: { type: 'unlock_power', target: 'fire_rain', value: 1 },
+  },
+  bronze_sovereign_frame: {
+    id: 'bronze_sovereign_frame',
+    name: 'Bronze Sovereign Citadel',
+    age: 'bronze',
+    branch: 'building',
+    description:
+      'Allows upgrading the Council Walker Base to Tier 3 and unlocks the Earthquake Spirit Power.',
+    cost: { wood: 320, stone: 300, bronze: 140 },
+    researchTime: 35,
+    prerequisite: 'sky_fire_ritual',
+    effect: { type: 'base_upgrade', value: 3 },
+  },
+
+  // ==========================================================================
+  // BRANCH 3: MILITARY & ARMORY (5 Techs)
+  // ==========================================================================
+  stone_weaponry: {
+    id: 'stone_weaponry',
+    name: 'Knapped Stone Forging',
+    age: 'stone',
+    branch: 'military',
+    description: 'Unlocks Tier 1 (Stone Weapons & Wood Plate Armor) upgrades in the Armory.',
+    cost: { food: 90, stone: 90 },
+    researchTime: 16,
+    effect: { type: 'unlock_equipment_tier', value: 1 },
+  },
+  sinew_bows: {
+    id: 'sinew_bows',
+    name: 'Composite Sinew Bows',
+    age: 'stone',
+    branch: 'military',
+    description: 'Unlocks training long-range Bow Hunters at the Sling Range.',
+    cost: { wood: 110, hide: 60 },
+    researchTime: 18,
+    prerequisite: 'stone_weaponry',
+    effect: { type: 'unlock_unit', target: 'bow_hunter', value: 1 },
+  },
+  bone_shields: {
+    id: 'bone_shields',
+    name: 'Carved Bone Shields',
+    age: 'bone',
+    branch: 'military',
+    description:
+      'Unlocks training Shield Bearers at the Barracks and Tier 2 (Bone) Armory upgrades.',
+    cost: { food: 130, stone: 110, hide: 80 },
+    researchTime: 22,
+    prerequisite: 'sinew_bows',
+    effect: { type: 'unlock_equipment_tier', value: 2 },
+  },
+  spirit_chants: {
+    id: 'spirit_chants',
+    name: 'Ancestral Mending Chants',
+    age: 'bone',
+    branch: 'military',
+    description: 'Unlocks training healing Bone Shamans at the Sling Range.',
+    cost: { food: 140, hide: 90, stone: 80 },
+    researchTime: 22,
+    prerequisite: 'bone_shields',
+    effect: { type: 'unlock_unit', target: 'shaman', value: 1 },
+  },
+  bronze_metallurgy: {
+    id: 'bronze_metallurgy',
+    name: 'Bronze War Metallurgy',
+    age: 'bronze',
+    branch: 'military',
+    description: 'Unlocks Tier 3 (Bronze Weapons & Bronze Plate Armor) in the Armory.',
+    cost: { wood: 180, stone: 160, bronze: 120 },
+    researchTime: 30,
+    prerequisite: 'spirit_chants',
+    effect: { type: 'unlock_equipment_tier', value: 3 },
+  },
+
+  // ==========================================================================
+  // BRANCH 4: MACHINES (5 Techs)
+  // ==========================================================================
+  wheelwright_craft: {
+    id: 'wheelwright_craft',
+    name: 'Heavy Wheelwright Craft',
+    age: 'stone',
+    branch: 'machines',
+    description: 'Unlocks the Machine Workshop to build Raider Carts and Bone Rams.',
+    cost: { wood: 140, stone: 100, hide: 40 },
+    researchTime: 18,
+    effect: { type: 'unlock_building', target: 'machine_workshop', value: 1 },
+  },
+  torsion_frames: {
+    id: 'torsion_frames',
+    name: 'Twisted Sinew Torsion',
+    age: 'bone',
+    branch: 'machines',
+    description: 'Unlocks the long-range Boulder Thrower siege machine.',
+    cost: { wood: 160, stone: 130, hide: 70 },
+    researchTime: 22,
+    prerequisite: 'wheelwright_craft',
+    effect: { type: 'unlock_machine', target: 'boulder_thrower', value: 1 },
+  },
+  carapace_plating: {
+    id: 'carapace_plating',
+    name: 'Giant Carapace Plating',
+    age: 'bone',
+    branch: 'machines',
+    description: 'Unlocks the high-armor defensive Shell Walker machine.',
+    cost: { wood: 150, stone: 150, hide: 95 },
+    researchTime: 24,
+    prerequisite: 'torsion_frames',
+    effect: { type: 'unlock_machine', target: 'shell_walker', value: 1 },
+  },
+  pitch_alchemy: {
+    id: 'pitch_alchemy',
+    name: 'Volcanic Pitch Alchemy',
+    age: 'bronze',
+    branch: 'machines',
+    description: 'Unlocks the area-burning Fire Catapult siege machine.',
+    cost: { wood: 180, stone: 140, bronze: 80 },
+    researchTime: 26,
+    prerequisite: 'carapace_plating',
+    effect: { type: 'unlock_machine', target: 'fire_catapult', value: 1 },
+  },
+  colossus_engineering: {
+    id: 'colossus_engineering',
+    name: 'Colossus Walker Engineering',
+    age: 'bronze',
+    branch: 'machines',
+    description: 'Unlocks the Mammoth Fortress top-tier machine that spawns free Crawlers.',
+    cost: { wood: 260, stone: 240, hide: 120, bronze: 140 },
+    researchTime: 34,
+    prerequisite: 'pitch_alchemy',
+    effect: { type: 'unlock_machine', target: 'mammoth_fortress', value: 1 },
+  },
+  bronze_titans: {
+    id: 'bronze_titans',
+    name: 'Bronze Titan Foundry',
+    age: 'bronze',
+    branch: 'machines',
+    description: 'Unlocks the ultimate Titan Walker colossus and Crawler spawner.',
+    cost: { wood: 320, stone: 300, hide: 150, bronze: 220 },
+    researchTime: 40,
+    prerequisite: 'colossus_engineering',
+    effect: { type: 'unlock_machine', target: 'titan_walker', value: 1 },
+  },
+};
+
+export const TECH_LIST: readonly TechDefinition[] = Object.values(TECHS);
