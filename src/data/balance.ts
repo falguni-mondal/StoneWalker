@@ -16,7 +16,7 @@ export const BALANCE = {
     food: 0.5,    // 🍖 Free Food gained per second
     wood: 0.5,    // 🪵 Free Wood gained per second
     stone: 0.5,   // 🪨 Free Stone gained per second
-    hide: 0.2,    // 🦌 Free Hide gained per second
+    hide: 0.5,    // 🦌 Free Hide gained per second
     bronze: 0.0,  // 🔶 Free Bronze Ore gained per second
   } satisfies Resources,
 
@@ -47,8 +47,8 @@ export const BALANCE = {
   WEATHER_SNOW_SPEED_MULTIPLIER: 0.85,
 
   // --- The Walking Base ("Council Walker") ---
-  /** Base firepower is reduced to 40% while walking in Move mode (Section 5). */
-  BASE_MOVE_FIREPOWER_MULTIPLIER: 0.4,
+  /** Base firepower is reduced to 60% while walking in Move mode (Section 5). */
+  BASE_MOVE_FIREPOWER_MULTIPLIER: 0.6,
   /** Base takes 25% more damage while walking due to exposed leg joints. */
   BASE_MOVE_ARMOR_MULTIPLIER: 0.75,
   /** Stomp crush damage per tick to enemy walls and light buildings in the Base's footprint. */
