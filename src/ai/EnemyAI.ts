@@ -151,7 +151,6 @@ export class EnemyAIController {
     const diffParams = BALANCE.AI_DIFFICULTY[this.difficulty];
     const profile = TRIBE_MILITARY_PROFILES[factionState.tribe];
 
-    // Ensure tribe-specific tech unlocks are available so AI can train its signature roster
     for (const techId of profile.unlockTechs) {
       if (!factionState.researchedTechs.includes(techId)) {
         factionState.researchedTechs.push(techId);
@@ -178,7 +177,6 @@ export class EnemyAIController {
     this.expansionTimer += dt;
     this.watchdogTimer += dt;
 
-    // 60-second Watchdog check (Section 12)
     const currentMetric =
       Math.floor(factionState.resources.food + factionState.resources.wood) +
       factionState.populationUsed * 50 +
@@ -204,7 +202,6 @@ export class EnemyAIController {
       return;
     }
 
-    // Periodically grow the AI camp (construct new buildings & upgrade Base Lv.1 -> 2 -> 3)
     if (this.expansionTimer >= 16) {
       this.expansionTimer = 0;
       this.tryExpandAndUpgradeBase(
@@ -334,11 +331,10 @@ export class EnemyAIController {
     myBase: BuildingEntity,
     factionState: FactionState,
     profile: TribeMilitaryProfile,
-    buildings: ReadonlyMap<EntityId, BuildingEntity>,
+    _buildings: ReadonlyMap<EntityId, BuildingEntity>,
     grid: WorldGrid,
     onSpawnBuilding?: (bld: BuildingEntity) => void,
   ): void {
-    // 1. Upgrade AI Base if ready
     if (
       myBase.level < 3 &&
       this.buildOrderIndex >= myBase.level * 2 &&
@@ -354,7 +350,6 @@ export class EnemyAIController {
       return;
     }
 
-    // 2. Construct next tribe building around the AI Base
     if (!onSpawnBuilding || this.buildOrderIndex >= profile.buildOrder.length) {
       return;
     }
@@ -417,7 +412,6 @@ export class EnemyAIController {
 
     this.trainCycleIndex += 1;
 
-    // Every 4th unit, train a tribe-specific War Machine if a Workshop is built (or Base Lv.2+)
     if (
       this.trainCycleIndex % 4 === 0 &&
       (workshop || myBase.level >= 2)
@@ -438,7 +432,6 @@ export class EnemyAIController {
       }
     }
 
-    // Otherwise train a tribe-specific Troop role
     const tRole =
       profile.troopPool[this.trainCycleIndex % profile.troopPool.length]!;
     const producer =
