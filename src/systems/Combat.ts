@@ -1,8 +1,7 @@
 /**
- * STONEWALKER — Real-Time Combat, Base Weapons, Projectiles & 5-Second Auto-Heal System
- * - Tracks time since last damage taken for every Unit, Worker, Machine, Hero, and Building.
- * - After 5 seconds without taking damage (`BALANCE.OUT_OF_COMBAT_HEAL_DELAY_SECONDS`),
- *   entities automatically regenerate HP every second.
+ * STONEWALKER — Real-Time Combat, Base Weapons, Projectiles & Auto-Heal System
+ * - Enforces strict friendly-fire protection: units and workers can NEVER attack or
+ *   trigger alarms on same-faction units or buildings.
  */
 
 import type { EventBus } from '../core/EventBus';
@@ -33,8 +32,13 @@ import { TerrainSystem } from './Terrain';
 import { VeterancySystem } from './Veterancy';
 
 export class CombatSystem {
-  /** Tracks seconds since each entity last took damage for the 5-second auto-heal rule. */
   private static readonly timeSinceDamaged = new Map<EntityId, number>();
+
+  private static getCombatConfig(faction: string) {
+    return faction === 'player'
+      ? BALANCE.PLAYER_COMBAT
+      : BALANCE.ENEMY_COMBAT;
+  }
 
   public static markEntityDamaged(id: EntityId): void {
     this.timeSinceDamaged.set(id, 0);
@@ -50,22 +54,24 @@ export class CombatSystem {
     bus: EventBus,
     dt: number,
   ): void {
-    // 1. Update Units (5-second Out-of-Combat Auto-Heal, Shaman Heal & Attacks)
+    // 1. Update Units (Out-of-Combat Auto-Heal, Shaman Heal & Attacks)
     for (const attacker of units.values()) {
       if (attacker.hp <= 0 || attacker.isReviving) {
         continue;
       }
 
-      // 💚 5-Second Out-of-Combat Auto-Heal for Army, Troops, Workers, Machines & Hero
-      const quietSec = (this.timeSinceDamaged.get(attacker.id) ?? 5.0) + dt;
+      const combatCfg = this.getCombatConfig(attacker.faction);
+      const quietSec =
+        (this.timeSinceDamaged.get(attacker.id) ??
+          combatCfg.OUT_OF_COMBAT_HEAL_DELAY_SECONDS) + dt;
       this.timeSinceDamaged.set(attacker.id, quietSec);
       if (
         attacker.hp < attacker.maxHp &&
-        quietSec >= BALANCE.OUT_OF_COMBAT_HEAL_DELAY_SECONDS
+        quietSec >= combatCfg.OUT_OF_COMBAT_HEAL_DELAY_SECONDS
       ) {
         attacker.hp = Math.min(
           attacker.maxHp,
-          attacker.hp + BALANCE.UNIT_AUTO_HEAL_HP_PER_SEC * dt,
+          attacker.hp + combatCfg.UNIT_AUTO_HEAL_HP_PER_SEC * dt,
         );
       }
 
@@ -85,13 +91,25 @@ export class CombatSystem {
         continue;
       }
 
+      const targetUnit = units.get(attacker.targetEntityId);
+      const targetBuilding = buildings.get(attacker.targetEntityId);
+
+      // STRICT FRIENDLY-FIRE GUARD: Never allow any unit or worker to attack its own faction!
+      if (
+        (targetUnit && targetUnit.faction === attacker.faction) ||
+        (targetBuilding && targetBuilding.faction === attacker.faction)
+      ) {
+        attacker.targetEntityId = null;
+        if (attacker.status === 'fighting') {
+          attacker.status = attacker.role === 'worker' ? 'working' : 'guarding';
+        }
+        continue;
+      }
+
       const taunter = this.findNearbyEnemyShieldBearer(attacker, units);
       if (taunter) {
         attacker.targetEntityId = taunter.id;
       }
-
-      const targetUnit = units.get(attacker.targetEntityId);
-      const targetBuilding = buildings.get(attacker.targetEntityId);
 
       if (
         (!targetUnit || targetUnit.hp <= 0) &&
@@ -180,11 +198,13 @@ export class CombatSystem {
       }
     }
 
-    // 2. Update Buildings (Fire DoT, 5-Second Out-of-Combat Auto-Heal & Base Auto-Defense)
+    // 2. Update Buildings (Fire DoT, Out-of-Combat Auto-Heal & Base Auto-Defense)
     for (const bld of buildings.values()) {
       if (bld.hp <= 0) {
         continue;
       }
+
+      const bldCombatCfg = this.getCombatConfig(bld.faction);
 
       if (bld.fireBurnTimer > 0) {
         bld.fireBurnTimer = Math.max(0, bld.fireBurnTimer - dt);
@@ -199,16 +219,17 @@ export class CombatSystem {
           continue;
         }
       } else if (bld.isConstructed) {
-        // 🏰 5-Second Out-of-Combat Auto-Heal for Constructed Buildings & Walking Base
-        const bldQuietSec = (this.timeSinceDamaged.get(bld.id) ?? 5.0) + dt;
+        const bldQuietSec =
+          (this.timeSinceDamaged.get(bld.id) ??
+            bldCombatCfg.OUT_OF_COMBAT_HEAL_DELAY_SECONDS) + dt;
         this.timeSinceDamaged.set(bld.id, bldQuietSec);
         if (
           bld.hp < bld.maxHp &&
-          bldQuietSec >= BALANCE.OUT_OF_COMBAT_HEAL_DELAY_SECONDS
+          bldQuietSec >= bldCombatCfg.OUT_OF_COMBAT_HEAL_DELAY_SECONDS
         ) {
           bld.hp = Math.min(
             bld.maxHp,
-            bld.hp + BALANCE.BUILDING_AUTO_HEAL_HP_PER_SEC * dt,
+            bld.hp + bldCombatCfg.BUILDING_AUTO_HEAL_HP_PER_SEC * dt,
           );
         }
       }
@@ -242,7 +263,9 @@ export class CombatSystem {
           targetPosition: { ...nearestEnemy.position },
           targetEntityId: nearestEnemy.id,
           speed: 16,
-          damage: baseStats.attackDamage,
+          damage: Math.round(
+            baseStats.attackDamage * bldCombatCfg.DAMAGE_MULTIPLIER,
+          ),
           damageType: 'pierce',
           splashRadius: 1.2,
           causesFire: bld.level >= 2,
@@ -293,13 +316,18 @@ export class CombatSystem {
     grid: WorldGrid,
     bus: EventBus,
   ): void {
-    // Reset the 5-second out-of-combat heal timer whenever an entity takes damage
-    this.markEntityDamaged(targetId);
-
     const attackerUnit = units.get(sourceId);
-    const targetUnit = units.get(targetId);
+    const attackerBld = buildings.get(sourceId);
+    const attackerFaction = attackerUnit?.faction ?? attackerBld?.faction;
 
+    const targetUnit = units.get(targetId);
     if (targetUnit && targetUnit.hp > 0) {
+      // Never damage same-faction units
+      if (attackerFaction && attackerFaction === targetUnit.faction) {
+        return;
+      }
+      this.markEntityDamaged(targetId);
+
       const targetFaction = factionById.get(targetUnit.faction);
       const { armorType, armorValue } = this.getTargetArmor(
         targetUnit,
@@ -343,6 +371,12 @@ export class CombatSystem {
 
     const targetBld = buildings.get(targetId);
     if (targetBld && targetBld.hp > 0) {
+      // Never damage or trigger alarm on same-faction buildings
+      if (attackerFaction && attackerFaction === targetBld.faction) {
+        return;
+      }
+      this.markEntityDamaged(targetId);
+
       const counterMult =
         BALANCE.DAMAGE_COUNTER_MATRIX[damageType].structure ?? 1.0;
       const bldDef = BUILDINGS[targetBld.buildingType];
@@ -390,13 +424,15 @@ export class CombatSystem {
     const tribe = factionState?.tribe ?? 'stonebacks';
     const tribeBonuses = TRIBES[tribe].bonuses;
     const vetMult = VeterancySystem.getDamageMultiplier(attacker);
+    const sideDamageMult =
+      this.getCombatConfig(attacker.faction).DAMAGE_MULTIPLIER;
 
     if (attacker.role === 'worker') {
       if (attacker.equippedEmergencyWeapon) {
         const w =
           BALANCE.EMERGENCY_WEAPON_STATS[attacker.equippedEmergencyWeapon];
         return {
-          damage: Math.round(w.damage * vetMult),
+          damage: Math.max(1, Math.round(w.damage * vetMult * sideDamageMult)),
           range: TerrainSystem.getEffectiveAttackRange(
             w.range,
             attacker.position,
@@ -408,7 +444,10 @@ export class CombatSystem {
       }
       if (factionState?.alarmActive) {
         return {
-          damage: BALANCE.WORKER_STONE_THROW_DAMAGE,
+          damage: Math.max(
+            1,
+            Math.round(BALANCE.WORKER_STONE_THROW_DAMAGE * sideDamageMult),
+          ),
           range: BALANCE.WORKER_STONE_THROW_RANGE,
           cooldown: BALANCE.WORKER_STONE_THROW_COOLDOWN,
           damageType: 'pierce',
@@ -418,7 +457,8 @@ export class CombatSystem {
 
     if (attacker.kind === 'unit') {
       const def = UNITS[attacker.role as UnitRole];
-      const wTier = factionState?.unitWeaponTiers[attacker.role as UnitRole] ?? 0;
+      const wTier =
+        factionState?.unitWeaponTiers[attacker.role as UnitRole] ?? 0;
       const tierMult = WEAPON_TIERS[wTier].damageMultiplier;
       const meleeMult =
         def.damageType === 'melee' ? tribeBonuses.meleeDamageMultiplier : 1.0;
@@ -428,8 +468,16 @@ export class CombatSystem {
         grid,
       );
       return {
-        damage: Math.round(
-          def.baseDamage * tierMult * meleeMult * vetMult * terrainDmgMult,
+        damage: Math.max(
+          1,
+          Math.round(
+            def.baseDamage *
+              tierMult *
+              meleeMult *
+              vetMult *
+              terrainDmgMult *
+              sideDamageMult,
+          ),
         ),
         range: TerrainSystem.getEffectiveAttackRange(
           def.attackRange,
@@ -448,11 +496,15 @@ export class CombatSystem {
           ? tribeBonuses.fireDamageMultiplier * weatherFireMultiplier
           : 1.0;
       return {
-        damage: Math.round(
-          def.baseDamage *
-            tribeBonuses.machineDamageMultiplier *
-            fireMult *
-            vetMult,
+        damage: Math.max(
+          1,
+          Math.round(
+            def.baseDamage *
+              tribeBonuses.machineDamageMultiplier *
+              fireMult *
+              vetMult *
+              sideDamageMult,
+          ),
         ),
         range: TerrainSystem.getEffectiveAttackRange(
           def.attackRange,
@@ -467,7 +519,10 @@ export class CombatSystem {
     if (attacker.kind === 'hero') {
       const def = HEROES[tribe];
       return {
-        damage: Math.round(def.damage * vetMult),
+        damage: Math.max(
+          1,
+          Math.round(def.damage * vetMult * sideDamageMult),
+        ),
         range: def.attackRange,
         cooldown: 1.1,
         damageType: tribe === 'ember_tribe' ? 'fire' : 'melee',
@@ -489,7 +544,8 @@ export class CombatSystem {
   ): { armorType: ArmorType; armorValue: number } {
     if (target.kind === 'unit') {
       const def = UNITS[target.role as UnitRole];
-      const aTier = factionState?.unitArmorTiers[target.role as UnitRole] ?? 0;
+      const aTier =
+        factionState?.unitArmorTiers[target.role as UnitRole] ?? 0;
       return {
         armorType: def.armorType,
         armorValue: def.baseArmor + ARMOR_TIERS[aTier].armorBonus,

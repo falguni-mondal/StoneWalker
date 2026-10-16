@@ -1,11 +1,11 @@
 /**
- * STONEWALKER — Fair, Paced Enemy AI Controller (Section 12)
- * - Strictly obeys Base-Level progression:
- *   * Base Lv.1: Basic Stone Age troops only (Clubbers, Spearmen, Slingers).
- *   * Base Lv.2: Unlocks Tier-2 troops (Shield Bearers, Bow Hunters, Scouts).
- *   * Base Lv.3 + Constructed Machine Workshop: Unlocks War Machines (and only after the
- *     player has also reached Base Lv.3).
- * - Zero resource cheating: AI must legitimately afford every unit and building.
+ * STONEWALKER — Difficulty-Scaled Enemy AI Controller (Section 12)
+ * - Scales decision speed, worker count, camp expansion speed, and attack wave size
+ *   using `BALANCE.AI_DIFFICULTY[this.difficulty]` (Easy, Normal, Hard).
+ * - Follows the same Base-Level progression rules as the player:
+ *   * Base Lv.1: Builds Lv.1 camps & trains Tier-1 infantry (Clubbers, Spearmen, Slingers).
+ *   * Base Lv.2: Builds Sling Range / Beast Pen / Armory & trains Tier-2 troops.
+ *   * Base Lv.3: Builds Machine Workshop & trains tribe-signature War Machines.
  */
 
 import type { EventBus } from '../core/EventBus';
@@ -56,7 +56,7 @@ export const TRIBE_MILITARY_PROFILES: Record<TribeId, TribeMilitaryProfile> = {
     ],
     tier1Troops: ['clubber', 'spearman'],
     tier2Troops: ['clubber', 'shield_bearer', 'spearman'],
-    machinePool: ['boulder_thrower', 'shell_walker'],
+    machinePool: ['boulder_thrower', 'shell_walker', 'mammoth_fortress'],
   },
   reef_clan: {
     buildOrder: [
@@ -68,7 +68,7 @@ export const TRIBE_MILITARY_PROFILES: Record<TribeId, TribeMilitaryProfile> = {
       'machine_workshop',
     ],
     tier1Troops: ['spearman', 'slinger'],
-    tier2Troops: ['spearman', 'scout', 'bow_hunter'],
+    tier2Troops: ['spearman', 'scout', 'bow_hunter', 'shaman'],
     machinePool: ['raider_cart', 'boulder_thrower'],
   },
   ember_tribe: {
@@ -82,7 +82,7 @@ export const TRIBE_MILITARY_PROFILES: Record<TribeId, TribeMilitaryProfile> = {
     ],
     tier1Troops: ['clubber', 'slinger'],
     tier2Troops: ['slinger', 'bow_hunter', 'spearman'],
-    machinePool: ['raider_cart', 'bone_ram', 'fire_catapult'],
+    machinePool: ['raider_cart', 'bone_ram', 'fire_catapult', 'titan_walker'],
   },
 };
 
@@ -94,7 +94,7 @@ export class EnemyAIController {
 
   private state: EnemyAIStateName = 'Boom';
   private decisionTimer = 0;
-  private attackCooldownTimer = 95;
+  private attackCooldownTimer = 75;
   private expansionTimer = 0;
   private watchdogTimer = 0;
   private lastKnownMetric = 0;
@@ -112,7 +112,7 @@ export class EnemyAIController {
     this.nightAttacks = params.nightAttacks;
     this.baseWalks = params.baseWalks;
     this.attackCooldownTimer =
-      BALANCE.AI_DIFFICULTY[params.difficulty].attackIntervalSec;
+      BALANCE.AI_DIFFICULTY[params.difficulty].attackIntervalSec * 0.85;
   }
 
   public getStateName(): EnemyAIStateName {
@@ -138,7 +138,7 @@ export class EnemyAIController {
     this.expansionTimer += dt;
     this.watchdogTimer += dt;
 
-    // 60-second Watchdog check (resets state if stuck, without granting free resources)
+    // 60-second Watchdog check
     const currentMetric =
       Math.floor(factionState.resources.food + factionState.resources.wood) +
       factionState.populationUsed * 50 +
@@ -161,20 +161,13 @@ export class EnemyAIController {
       return;
     }
 
-    const playerBaseLevel = ConstructionSystem.getFactionBaseLevel(
-      'player',
-      buildings.values(),
-    );
-
-    // Sync AI tech unlocks strictly to the AI's current Base Level
     this.syncTechsForBaseLevel(factionState, myBase.level);
 
-    // Slow, fair camp expansion (checks every 65 seconds instead of 16 seconds)
-    if (this.expansionTimer >= 65) {
+    // Camp expansion & Base upgrade interval scaled by Difficulty (Easy: 48s, Normal: 32s, Hard: 22s)
+    if (this.expansionTimer >= diffParams.expansionIntervalSec) {
       this.expansionTimer = 0;
       this.tryExpandAndUpgradeBase(
         myBase,
-        playerBaseLevel,
         factionState,
         profile,
         buildings,
@@ -189,16 +182,16 @@ export class EnemyAIController {
     const myWorkers = myUnits.filter((u) => u.role === 'worker');
     const myArmy = myUnits.filter((u) => u.role !== 'worker');
 
-    const maxWorkers =
-      this.difficulty === 'easy' ? 2 : this.difficulty === 'normal' ? 3 : 3;
-
     if (factionState.alarmActive) {
       this.state = 'Defend';
     }
 
     switch (this.state) {
       case 'Boom': {
-        if (myWorkers.length < maxWorkers && myBase.queue.length < 1) {
+        if (
+          myWorkers.length < diffParams.maxWorkers &&
+          myBase.queue.length < 2
+        ) {
           ProductionSystem.enqueueUnitOrItem(
             myBase,
             'worker',
@@ -220,9 +213,8 @@ export class EnemyAIController {
 
       case 'BuildArmy': {
         if (myArmy.length < diffParams.targetArmySize) {
-          this.trainFairUnit(
+          this.trainUnitForCurrentTier(
             myBase,
-            playerBaseLevel,
             factionState,
             profile,
             buildings,
@@ -233,8 +225,8 @@ export class EnemyAIController {
         const nightReady =
           !this.nightAttacks || isNight || this.attackCooldownTimer <= 0;
         const minWaveSize = Math.max(
-          3,
-          Math.floor(diffParams.targetArmySize * 0.75),
+          4,
+          Math.floor(diffParams.targetArmySize * 0.7),
         );
         if (
           myArmy.length >= minWaveSize &&
@@ -270,8 +262,8 @@ export class EnemyAIController {
 
         if (
           this.baseWalks &&
-          myBase.level >= 3 &&
-          myBase.hp > myBase.maxHp * 0.7
+          myBase.level >= 2 &&
+          myBase.hp > myBase.maxHp * 0.65
         ) {
           setBaseMode(myBase, 'move');
           if (myBase.path.length === 0) {
@@ -320,28 +312,33 @@ export class EnemyAIController {
       addTech('stone_weaponry');
       addTech('bone_shields');
       addTech('sinew_bows');
+      addTech('spirit_chants');
     }
     if (baseLevel >= 3) {
       addTech('wheelwright_craft');
       addTech('torsion_frames');
       addTech('carapace_plating');
       addTech('pitch_alchemy');
+      if (this.difficulty === 'hard') {
+        addTech('colossus_engineering');
+        addTech('bronze_titans');
+      }
     }
   }
 
   private tryExpandAndUpgradeBase(
     myBase: BuildingEntity,
-    playerBaseLevel: number,
     factionState: FactionState,
     profile: TribeMilitaryProfile,
     _buildings: ReadonlyMap<EntityId, BuildingEntity>,
     grid: WorldGrid,
     onSpawnBuilding?: (bld: BuildingEntity) => void,
   ): void {
-    // AI never upgrades its Base ahead of the player's Base Level!
+    // 1. Upgrade AI Base (Lv.1 -> Lv.2 -> Lv.3) once it has built its current tier's buildings
+    //    and legitimately saved up the required Wood/Stone/Hide upgrade cost.
+    const maxAllowedBaseLv = this.difficulty === 'easy' ? 2 : 3;
     if (
-      myBase.level < 3 &&
-      myBase.level < playerBaseLevel &&
+      myBase.level < maxAllowedBaseLv &&
       this.buildOrderIndex >= myBase.level * 2
     ) {
       const nextTier = BASE_TIER_STATS[myBase.level];
@@ -363,6 +360,7 @@ export class EnemyAIController {
       }
     }
 
+    // 2. Construct the next camp building in the tribe's build order if unlocked by Base Level
     if (!onSpawnBuilding || this.buildOrderIndex >= profile.buildOrder.length) {
       return;
     }
@@ -370,7 +368,6 @@ export class EnemyAIController {
     const nextBldType = profile.buildOrder[this.buildOrderIndex]!;
     const def = BUILDINGS[nextBldType];
 
-    // Respect Base-Level building requirements (e.g. Machine Workshop requires Base Lv.3)
     if ((def.requiredBaseLevel ?? 1) > myBase.level) {
       return;
     }
@@ -405,9 +402,8 @@ export class EnemyAIController {
     }
   }
 
-  private trainFairUnit(
+  private trainUnitForCurrentTier(
     myBase: BuildingEntity,
-    playerBaseLevel: number,
     factionState: FactionState,
     profile: TribeMilitaryProfile,
     buildings: ReadonlyMap<EntityId, BuildingEntity>,
@@ -420,13 +416,13 @@ export class EnemyAIController {
 
     this.trainCycleIndex += 1;
 
-    // Strictly gate War Machines: requires AI Base Lv.3, Player Base Lv.3, AND a built Machine Workshop
+    // Only train War Machines once the AI has upgraded its Base to Lv.3 AND built a Machine Workshop
+    const machineFrequency = this.difficulty === 'hard' ? 4 : 5;
     if (
       myBase.level >= 3 &&
-      playerBaseLevel >= 3 &&
       workshop !== null &&
-      this.trainCycleIndex % 6 === 0 &&
-      workshop.queue.length < 1
+      this.trainCycleIndex % machineFrequency === 0 &&
+      workshop.queue.length < 2
     ) {
       const mRole =
         profile.machinePool[
@@ -441,7 +437,7 @@ export class EnemyAIController {
       return;
     }
 
-    // Choose troop pool based on AI Base Level
+    // Train Tier-2 troops at Base Lv.2+, or Tier-1 troops at Base Lv.1
     const pool =
       myBase.level >= 2 ? profile.tier2Troops : profile.tier1Troops;
     const tRole = pool[this.trainCycleIndex % pool.length]!;

@@ -1,8 +1,5 @@
 /**
- * STONEWALKER — Welcome Screen, 3-Slot Saved Games Manager (with Erase), Skirmish, Settings & Credits
- * - Manages max 3 Save Slots (Slot 1, Slot 2, Slot 3).
- * - Defaults to overwriting Slot 1 unless the player selects Slot 2 or Slot 3.
- * - Includes an Erase button (🗑️ Erase) on each slot to clear saved progress.
+ * STONEWALKER — Welcome Screen, 3-Slot Saved Games Manager, Restart Level, Skirmish, Settings & Credits
  */
 
 import type { SavedBattleSnapshot, SaveSlotIndex } from '../core/SaveSystem';
@@ -23,6 +20,7 @@ export interface MenusCallbacks {
   onOpenCampaign: () => void;
   onStartSkirmish: (level: LevelDefinition, tribe: TribeId) => void;
   onResumeCurrentBattle: () => void;
+  onRestartLevel: () => void;
   onLoadSavedSlot: (slot: SaveSlotIndex) => void;
   onSaveToSlot: (slot: SaveSlotIndex) => void;
   onEraseSlot: (slot: SaveSlotIndex) => void;
@@ -127,6 +125,9 @@ export class MenusManager {
           <button id="mm-play" class="sw-btn sw-btn-primary welcome-btn-main">
             ▶ ${hasSavedSnapshot ? `Continue Battle (Slot ${activeSlot})` : 'Play Game'}
           </button>
+          <button id="mm-restart" class="sw-btn sw-btn-danger welcome-btn">
+            🔄 Restart Current Level
+          </button>
           <button id="mm-campaign" class="sw-btn welcome-btn">
             🗺️ Campaign Map (8 Levels)
           </button>
@@ -160,6 +161,13 @@ export class MenusManager {
       this.hideAll();
       this.callbacks.onResumeCurrentBattle();
     });
+
+    this.mainMenuEl
+      .querySelector('#mm-restart')
+      ?.addEventListener('click', () => {
+        this.hideAll();
+        this.callbacks.onRestartLevel();
+      });
 
     this.mainMenuEl
       .querySelector('#mm-campaign')
@@ -205,9 +213,6 @@ export class MenusManager {
     this.callbacks.onVisibilityChange?.(false);
   }
 
-  /**
-   * 3-Slot Saved Games Manager with Active Auto-Save Slot Selection, Load, Save & Erase.
-   */
   public showSavedGamesModal(): void {
     this.openSubModal();
     const { activeSlot, slots } = this.callbacks.onGetSaveSlotsState();
@@ -223,8 +228,7 @@ export class MenusManager {
         return `
           <div class="parchment-card" style="padding:12px;display:flex;flex-direction:column;gap:8px;border:${isSelected ? '2px solid var(--accent-primary)' : '2px solid var(--border-parchment)'};">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">
-              <strong style="font-size:0.95rem;">Save Slot ${slotNum} (Empty)</strong>
-              ${badge}
+              <strong style="font-size:0.95rem;">Save Slot ${slotNum} (Empty)</strong>${badge}
             </div>
             <div style="font-size:0.76rem;color:#5c4938;">
               No saved battle in Slot ${slotNum} yet. Click Save Here to store your current battle.
@@ -250,11 +254,10 @@ export class MenusManager {
       return `
         <div class="parchment-card" style="padding:12px;display:flex;flex-direction:column;gap:8px;border:${isSelected ? '2px solid var(--accent-primary)' : '2px solid var(--border-parchment)'};">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">
-            <strong style="font-size:0.95rem;">Save Slot ${slotNum} — ${lvlLabel}</strong>
-            ${badge}
+            <strong style="font-size:0.95rem;">Save Slot ${slotNum} — ${lvlLabel}</strong>${badge}
           </div>
           <div style="font-size:0.75rem;color:#4a3928;">
-            Saved: ${dateStr} · ${resSummary}
+            Saved: ${dateStr} ·${resSummary}
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;">
             <button data-load-slot="${slotNum}" class="sw-btn sw-btn-success" style="min-height:36px;flex:1;">
@@ -281,8 +284,7 @@ export class MenusManager {
       </div>
       <div style="display:flex;flex-direction:column;gap:10px;">
         ${formatSlotCard(1)}
-        ${formatSlotCard(2)}
-        ${formatSlotCard(3)}
+        ${formatSlotCard(2)}${formatSlotCard(3)}
       </div>
       <div style="display:flex;justify-content:flex-end;margin-top:4px;">
         <button id="sg-back" class="sw-btn">Close</button>
@@ -356,7 +358,7 @@ export class MenusManager {
       .map(
         (cnt) => `
         <button data-sk-enemies="${cnt}" class="segmented-pill ${this.skirmishEnemies === cnt ? 'active' : ''}">
-          ${cnt} AI ${cnt === 1 ? 'Tribe' : 'Tribes'}
+          ${cnt} AI${cnt === 1 ? 'Tribe' : 'Tribes'}
         </button>
       `,
       )
@@ -707,9 +709,9 @@ export class MenusManager {
         <button id="htp-close" class="sw-btn" style="min-height:34px;">✕</button>
       </div>
       <div class="parchment-card" style="padding:12px;font-size:0.83rem;display:flex;flex-direction:column;gap:8px;line-height:1.4;">
-        <div><strong>1. Select & Tap the Floating 📊 Icon:</strong> Tap any unit, machine, or building to select it—a floating <em>📊 Stats</em> button will follow it on screen. Tap that floating icon whenever you want to open its realtime stats, train troops, or upgrade!</div>
-        <div><strong>2. Upgrade Your Base to Unlock Buildings:</strong> Upgrade your Council Walker Base to <strong>Lv.2</strong> to unlock the <em>Sling Range, Tannery, Beast Pen, Armory, Research Hall (Lab), and Spirit Totem</em>, and to <strong>Lv.3</strong> to unlock the <em>Machine Workshop and Bronze Smeltery</em>!</div>
-        <div><strong>3. 3 Save Slots & Auto-Save:</strong> Your game auto-saves every 20 seconds to your active slot (Slot 1 by default) and automatically loads your last saved game when you open the website.</div>
+        <div><strong>1. Select & Tap 📊 Stats in the Orders Bar:</strong> Select any unit, machine, or building and tap the green <em>📊 Stats</em> button in the Orders bar to inspect, train troops, upgrade, or <em>🗑️ Destroy</em> a building.</div>
+        <div><strong>2. Smart Builders:</strong> Workers automatically prioritize and finish any incomplete or damaged buildings in your camp.</div>
+        <div><strong>3. Upgrade Your Base to Unlock Buildings:</strong> Upgrade your Council Walker Base to <strong>Lv.2</strong> and <strong>Lv.3</strong> to unlock advanced buildings and war machines.</div>
       </div>
       <div style="display:flex;justify-content:flex-end;">
         <button id="htp-done" class="sw-btn sw-btn-primary">Got It</button>
@@ -731,6 +733,7 @@ export class MenusManager {
     unitsLost: number;
     enemiesDefeated: number;
     onContinue: () => void;
+    onRestart?: () => void;
   }): void {
     this.openSubModal();
     const starDisplay = params.won
@@ -746,13 +749,27 @@ export class MenusManager {
           ${starDisplay}
         </div>
         <div class="parchment-card" style="padding:12px;display:flex;justify-content:space-around;flex-wrap:wrap;gap:8px;font-weight:800;">
-          <span>Time: ${Math.floor(params.elapsedSec / 60)}m ${Math.floor(params.elapsedSec % 60)}s</span>
+          <span>Time: ${Math.floor(params.elapsedSec / 60)}m${Math.floor(params.elapsedSec % 60)}s</span>
           <span>Enemies Defeated: ${params.enemiesDefeated}</span>
           <span>Units Lost: ${params.unitsLost}</span>
         </div>
-        <button id="end-continue" class="sw-btn sw-btn-primary" style="width:100%;">Continue to Campaign Map</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="end-restart" class="sw-btn sw-btn-danger" style="flex:1;">🔄 Restart Level</button>
+          <button id="end-continue" class="sw-btn sw-btn-primary" style="flex:1;">🗺️ Campaign Map</button>
+        </div>
       </div>
     `;
+
+    this.modalEl
+      .querySelector('#end-restart')
+      ?.addEventListener('click', () => {
+        this.hideAll();
+        if (params.onRestart) {
+          params.onRestart();
+        } else {
+          this.callbacks.onRestartLevel();
+        }
+      });
 
     this.modalEl
       .querySelector('#end-continue')

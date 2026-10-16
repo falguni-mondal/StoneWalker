@@ -1,9 +1,9 @@
 /**
  * STONEWALKER — Complete Production Game Coordinator
- * - Single-Row Orders Bar with Integrated Selection Controls:
- *   When troop(s), machine(s), or building(s) are selected, the `📊 Stats` button and
- *   `✕` (Cancel Selection) button appear right inside the Orders bar on the same row.
- * - Clicking `📊 Stats` opens/toggles the stats card popup; clicking `✕` cancels the selection.
+ * - Connects `onRestartLevel` in HUD & Menus and `onDestroyBuilding` in SelectionBar.
+ * - Smart Worker Assignment: Placing a new building prefers idle or gathering workers so
+ *   active builders never abandon an unfinished building at 94%.
+ * - Demolishing a building via `🗑️ Destroy` refunds 50% of its resources and frees its tiles.
  */
 
 import * as THREE from 'three';
@@ -38,6 +38,7 @@ import type {
   LevelDefinition,
   MachineRole,
   ProjectileEntity,
+  ResourceType,
   TileCoord,
   TribeId,
   UnitEntity,
@@ -68,6 +69,7 @@ import { GatheringSystem } from './systems/Gathering';
 import { HousingSystem } from './systems/Housing';
 import { IdleBehaviorSystem } from './systems/IdleBehavior';
 import { MovementSystem } from './systems/Movement';
+import { Pathfinder } from './systems/Pathfinding';
 import { type ActivePowerZone, PowersSystem } from './systems/Powers';
 import { ProductionSystem } from './systems/Production';
 import { SpawnerSystem } from './systems/Spawner';
@@ -226,6 +228,9 @@ export class StonewalkerGame {
         this.hud.setPauseButtonLabel(true);
         this.menus.showSavedGamesModal();
       },
+      onRestartLevel: () => {
+        this.restartCurrentLevel();
+      },
       onOpenMainMenu: () => {
         this.sfx.playTap();
         this.loop.setPaused(true);
@@ -355,6 +360,7 @@ export class StonewalkerGame {
           )
         ) {
           this.rebuildPlayerUnitMeshes();
+          this.selectionBar.invalidate();
         }
       },
       onUpgradeArmorTier: (role) => {
@@ -370,6 +376,7 @@ export class StonewalkerGame {
           )
         ) {
           this.rebuildPlayerUnitMeshes();
+          this.selectionBar.invalidate();
         }
       },
       onCraftEmergencyWeapon: (itemType) => {
@@ -488,6 +495,9 @@ export class StonewalkerGame {
       onUpgradeBuilding: (buildingId) => {
         this.handleBuildingUpgradeWithRewards(buildingId);
       },
+      onDestroyBuilding: (buildingId) => {
+        this.handleDestroyBuilding(buildingId);
+      },
       onToggleUnitStance: () => {
         this.sfx.playTap();
         for (const id of this.commandResolver.getSelectedIds()) {
@@ -559,6 +569,10 @@ export class StonewalkerGame {
         this.hud.setPauseButtonLabel(false);
         uiLayer.classList.remove('welcome-active');
       },
+      onRestartLevel: () => {
+        this.restartCurrentLevel();
+        uiLayer.classList.remove('welcome-active');
+      },
       onLoadSavedSlot: (slot) => {
         const snap = this.saveSystem.loadBattle(slot);
         if (snap) {
@@ -607,6 +621,7 @@ export class StonewalkerGame {
       onDoubleTap: (_screen, worldPos) => {
         this.sfx.playTap();
         this.commandResolver.handleDoubleTap(worldPos, this.getCommandContext());
+        this.selectionBar.invalidate();
         this.refreshSelectionUI();
       },
       onLongPress: (_screen, worldPos) => {
@@ -619,6 +634,7 @@ export class StonewalkerGame {
           endW,
           this.getCommandContext(),
         );
+        this.selectionBar.invalidate();
         this.refreshSelectionUI();
       },
       onDragMoveGhost: (worldPos) => {
@@ -642,6 +658,7 @@ export class StonewalkerGame {
         this.handlePointerInteraction(worldPos, shiftKey, false),
       onDoubleClick: (_screen, worldPos) => {
         this.commandResolver.handleDoubleTap(worldPos, this.getCommandContext());
+        this.selectionBar.invalidate();
         this.refreshSelectionUI();
       },
       onRightClick: (_screen, worldPos) => this.handleCommandPoint(worldPos),
@@ -651,6 +668,7 @@ export class StonewalkerGame {
           endW,
           this.getCommandContext(),
         );
+        this.selectionBar.invalidate();
         this.refreshSelectionUI();
       },
       onHoverWorld: () => {},
@@ -721,10 +739,92 @@ export class StonewalkerGame {
   }
 
   /**
-   * Builds the Bottom HUD Stack.
-   * The Orders Bar includes `#btn-order-stats` (📊 Stats) and `#btn-order-deselect` (✕)
-   * on the exact same single row, appearing whenever any unit/machine/building is selected.
+   * Restarts the current level cleanly with the player's active tribe.
    */
+  private restartCurrentLevel(): void {
+    this.sfx.playBuildComplete();
+    this.haptics.buildComplete();
+    const playerTribe =
+      this.factions.get('player')?.tribe ??
+      this.currentLevel.playerTribeDefault ??
+      'stonebacks';
+    this.startLevel(this.currentLevel, playerTribe);
+    this.loop.setPaused(false);
+    this.hud.setPauseButtonLabel(false);
+    this.menus.hideAll();
+    this.notifications.pushToast(
+      `🔄 Restarted ${this.currentLevel.name}!`,
+      'info',
+    );
+  }
+
+  /**
+   * Demolishes a non-base player building, frees its grid footprint, and refunds 50% of its cost.
+   */
+  private handleDestroyBuilding(buildingId: EntityId): void {
+    const bld = this.buildings.get(buildingId);
+    if (!bld || bld.faction !== 'player') return;
+    if (bld.buildingType === 'base') {
+      this.notifications.pushToast(
+        'Cannot destroy your Council Walker Base!',
+        'warning',
+      );
+      return;
+    }
+
+    const def = BUILDINGS[bld.buildingType];
+    const playerState = this.factions.get('player')!;
+
+    // Refund 50% of base building cost
+    const refundParts: string[] = [];
+    for (const [resKey, amount] of Object.entries(def.cost)) {
+      const refund = Math.floor((amount ?? 0) * 0.5);
+      if (refund > 0) {
+        const r = resKey as ResourceType;
+        playerState.resources[r] = Math.min(
+          playerState.storageCaps[r],
+          playerState.resources[r] + refund,
+        );
+        refundParts.push(`+${refund} ${r}`);
+      }
+    }
+
+    // Clear footprint & remove 3D mesh
+    this.world.grid.setBuildingFootprint(bld.tile, bld.footprint, null);
+    const mesh = this.buildingMeshes.get(buildingId);
+    if (mesh) {
+      this.entityGroup.remove(mesh);
+      this.buildingMeshes.delete(buildingId);
+    }
+    this.buildings.delete(buildingId);
+
+    // Free any workers that were assigned to build/repair this building
+    for (const u of this.units.values()) {
+      if (
+        u.faction === 'player' &&
+        u.role === 'worker' &&
+        u.jobMemory.targetEntityId === buildingId
+      ) {
+        u.jobMemory.jobType = 'none';
+        u.jobMemory.targetEntityId = null;
+        u.status = 'idle';
+        u.path = [];
+      }
+    }
+
+    this.sfx.playStomp();
+    this.haptics.tap();
+    this.effects.spawnDustPuff(bld.position, this.world.heightMap);
+    this.commandResolver.clearSelection();
+    this.selectionBar.setPopupOpen(false);
+    this.recomputeFogAndMeshes();
+    this.refreshSelectionUI();
+    this.notifications.pushToast(
+      `🗑️ Demolished ${def.name} (${refundParts.join(', ') || 'Cleared'})`,
+      'info',
+    );
+  }
+
   private buildStackedBottomDock(uiLayer: HTMLElement): {
     bottomStack: HTMLElement;
     ordersBar: HTMLElement;
@@ -867,11 +967,24 @@ export class StonewalkerGame {
         this.sfx.playTap();
         const armyIds: EntityId[] = [];
         for (const u of this.units.values()) {
-          if (u.hp > 0 && u.faction === 'player' && u.role !== 'worker') {
+          if (
+            u.hp > 0 &&
+            !u.isReviving &&
+            u.faction === 'player' &&
+            u.role !== 'worker'
+          ) {
             armyIds.push(u.id);
           }
         }
+        if (armyIds.length === 0) {
+          this.notifications.pushToast(
+            'No combat troops or machines available.',
+            'info',
+          );
+          return;
+        }
         this.commandResolver.setSelectedIds(armyIds);
+        this.selectionBar.invalidate();
         this.refreshSelectionUI();
       });
 
@@ -886,6 +999,7 @@ export class StonewalkerGame {
           }
         }
         this.commandResolver.setSelectedIds(bldIds);
+        this.selectionBar.invalidate();
         this.refreshSelectionUI();
       });
 
@@ -925,7 +1039,13 @@ export class StonewalkerGame {
           this.commandResolver.setSelectedIds(idleIds);
           const first = this.units.get(idleIds[0]!);
           if (first) this.cameraRig.jumpTo(first.position);
+          this.selectionBar.invalidate();
           this.refreshSelectionUI();
+        } else {
+          this.notifications.pushToast(
+            'All workers are currently busy!',
+            'info',
+          );
         }
       });
 
@@ -954,7 +1074,6 @@ export class StonewalkerGame {
         btn.classList.toggle('sw-btn-primary', isVisible);
       });
 
-    // Clicking 📊 Stats inside the Orders bar opens/toggles the stats card popup
     ordersBar
       .querySelector('#btn-order-stats')
       ?.addEventListener('click', (e) => {
@@ -970,7 +1089,6 @@ export class StonewalkerGame {
         this.refreshSelectionUI();
       });
 
-    // Clicking ✕ Cancel inside the Orders bar cancels the selection and closes the stats card
     ordersBar
       .querySelector('#btn-order-deselect')
       ?.addEventListener('click', (e) => {
@@ -1132,17 +1250,18 @@ export class StonewalkerGame {
       }
 
       case 'armory': {
-        const newTier = Math.min(3, bld.level) as WeaponTier & ArmorTier;
+        const newTier = Math.min(3, bld.level) as WeaponTier;
+        const newArmorTier = Math.min(3, bld.level) as ArmorTier;
         playerState.unlockedWeaponTier = newTier;
-        playerState.unlockedArmorTier = newTier;
+        playerState.unlockedArmorTier = newArmorTier;
         if (bld.level === 2) unlockTech('bone_shields');
         if (bld.level === 3) unlockTech('bronze_metallurgy');
         for (const r of Object.keys(playerState.unitWeaponTiers) as UnitRole[]) {
           if (playerState.unitWeaponTiers[r] < newTier) {
             playerState.unitWeaponTiers[r] = newTier;
           }
-          if (playerState.unitArmorTiers[r] < newTier) {
-            playerState.unitArmorTiers[r] = newTier;
+          if (playerState.unitArmorTiers[r] < newArmorTier) {
+            playerState.unitArmorTiers[r] = newArmorTier;
           }
         }
         this.rebuildPlayerUnitMeshes();
@@ -1223,7 +1342,8 @@ export class StonewalkerGame {
       unlockTech('stone_weaponry');
       if (nextLv >= 2) unlockTech('bone_shields');
       if (nextLv >= 3) unlockTech('bronze_metallurgy');
-      const tier = Math.min(3, nextLv - 1) as WeaponTier & ArmorTier;
+      const wTier = Math.min(3, nextLv - 1) as WeaponTier;
+      const aTier = Math.min(3, nextLv - 1) as ArmorTier;
       for (const role of [
         'clubber',
         'spearman',
@@ -1231,11 +1351,11 @@ export class StonewalkerGame {
       ] as UnitRole[]) {
         playerState.unitWeaponTiers[role] = Math.max(
           playerState.unitWeaponTiers[role],
-          tier,
+          wTier,
         ) as WeaponTier;
         playerState.unitArmorTiers[role] = Math.max(
           playerState.unitArmorTiers[role],
-          tier,
+          aTier,
         ) as ArmorTier;
       }
       for (const u of this.units.values()) {
@@ -1253,7 +1373,8 @@ export class StonewalkerGame {
     } else if (category === 'ranged') {
       unlockTech('sinew_bows');
       if (nextLv >= 3) unlockTech('spirit_chants');
-      const tier = Math.min(3, nextLv - 1) as WeaponTier & ArmorTier;
+      const wTier = Math.min(3, nextLv - 1) as WeaponTier;
+      const aTier = Math.min(3, nextLv - 1) as ArmorTier;
       for (const role of [
         'slinger',
         'bow_hunter',
@@ -1262,11 +1383,11 @@ export class StonewalkerGame {
       ] as UnitRole[]) {
         playerState.unitWeaponTiers[role] = Math.max(
           playerState.unitWeaponTiers[role],
-          tier,
+          wTier,
         ) as WeaponTier;
         playerState.unitArmorTiers[role] = Math.max(
           playerState.unitArmorTiers[role],
-          tier,
+          aTier,
         ) as ArmorTier;
       }
       for (const u of this.units.values()) {
@@ -1336,6 +1457,12 @@ export class StonewalkerGame {
     this.levelEnded = false;
     this.rng = new RNG(level.seed);
     this.weather.setTheme(level.theme, level.weatherDefault);
+
+    this.labLevels.workers = 1;
+    this.labLevels.infantry = 1;
+    this.labLevels.ranged = 1;
+    this.labLevels.machines = 1;
+    this.labLevels.hero = 1;
 
     this.units.clear();
     this.buildings.clear();
@@ -1422,6 +1549,14 @@ export class StonewalkerGame {
     this.dayNight.setState(snap.dayNight);
     this.weather.setState(snap.weather);
 
+    for (const oldBld of this.buildings.values()) {
+      this.world.grid.setBuildingFootprint(
+        oldBld.tile,
+        oldBld.footprint,
+        null,
+      );
+    }
+
     this.units.clear();
     this.buildings.clear();
     this.unitMeshes.clear();
@@ -1430,9 +1565,20 @@ export class StonewalkerGame {
     this.world.grid.spatialHash.clear();
 
     this.factions.clear();
+    this.enemyAIs.length = 0;
     for (const f of snap.factions) {
       this.factions.set(f.faction, f);
       this.tribeByFaction.set(f.faction, f.tribe);
+      if (f.faction.startsWith('enemy_')) {
+        this.enemyAIs.push(
+          new EnemyAIController({
+            faction: f.faction,
+            difficulty: lvl.enemyDifficulty,
+            nightAttacks: lvl.enemyNightAttacks,
+            baseWalks: lvl.enemyBaseWalks,
+          }),
+        );
+      }
     }
 
     this.world.resources.deserialize(snap.resources, this.world.grid);
@@ -1442,18 +1588,33 @@ export class StonewalkerGame {
     for (const u of snap.units) {
       this.addUnit(u);
     }
+
+    const restoredBase = this.findPlayerBuilding('base');
+    this.commandResolver.setSelectedIds(
+      restoredBase ? [restoredBase.id] : [],
+    );
+    if (restoredBase) {
+      this.cameraRig.jumpTo(restoredBase.position);
+    }
     this.selectionBar.setPopupOpen(false);
+    this.selectionBar.invalidate();
     this.recomputeFogAndMeshes();
+    this.refreshSelectionUI();
   }
 
   private createInitialFactionState(
     faction: FactionId,
     tribe: TribeId,
   ): FactionState {
+    const startingResources =
+      faction === 'player'
+        ? BALANCE.PLAYER_ECONOMY.STARTING_RESOURCES
+        : BALANCE.ENEMY_ECONOMY.STARTING_RESOURCES;
+
     return {
       faction,
       tribe,
-      resources: { ...BALANCE.STARTING_RESOURCES },
+      resources: { ...startingResources },
       storageCaps: { ...BALANCE.BASE_STORAGE_CAP },
       populationUsed: 0,
       populationCap: 20,
@@ -1692,6 +1853,9 @@ export class StonewalkerGame {
           const progress = this.saveSystem.loadProgress();
           this.levelSelect.show(progress.starsByLevel);
         },
+        onRestart: () => {
+          this.restartCurrentLevel();
+        },
       });
     });
   }
@@ -1714,18 +1878,56 @@ export class StonewalkerGame {
     return null;
   }
 
+  /**
+   * Smart Worker Assignment:
+   * Prefers idle or resource-gathering workers and NEVER steals a worker that is
+   * already constructing another unfinished building (unless all workers are building).
+   */
   private assignNearestIdleWorkerToBuild(bld: BuildingEntity): void {
+    let bestWorker: UnitEntity | null = null;
+    let bestScore = Infinity;
+
     for (const u of this.units.values()) {
-      if (u.faction === 'player' && u.role === 'worker' && u.hp > 0) {
-        u.jobMemory = {
-          jobType: 'build',
-          targetEntityId: bld.id,
-          resourceType: null,
-          targetPosition: { ...bld.position },
-        };
-        u.status = 'working';
-        break;
+      if (u.faction !== 'player' || u.role !== 'worker' || u.hp <= 0) {
+        continue;
       }
+      const dist = Math.hypot(
+        u.position.x - bld.position.x,
+        u.position.z - bld.position.z,
+      );
+      // Penalize workers currently building another unfinished structure so we don't interrupt them
+      const busyPenalty =
+        u.jobMemory.jobType === 'build'
+          ? 1000
+          : u.jobMemory.jobType === 'gather'
+            ? 15
+            : 0;
+      const score = dist + busyPenalty;
+      if (score < bestScore) {
+        bestScore = score;
+        bestWorker = u;
+      }
+    }
+
+    if (bestWorker && bestWorker.jobMemory.jobType !== 'build') {
+      bestWorker.targetEntityId = null;
+      bestWorker.jobMemory = {
+        jobType: 'build',
+        targetEntityId: bld.id,
+        resourceType:
+          bestWorker.jobMemory.resourceType ?? bestWorker.carryResourceType,
+        targetPosition: { ...bld.position },
+      };
+      bestWorker.status = 'working';
+      bestWorker.path = Pathfinder.findPath(
+        this.world.grid,
+        bestWorker.position,
+        bld.position,
+        {
+          footprint: 1,
+          ignoreEntityId: bld.id,
+        },
+      );
     }
   }
 
@@ -1908,6 +2110,10 @@ export class StonewalkerGame {
         this.commandResolver.hasSelectedPlayerWorkers(ctx)
       ) {
         this.handleCommandPoint(worldPos);
+        this.notifications.pushToast(
+          `🔨 Worker assigned to ${!bld.isConstructed ? 'finish building' : 'repair'} ${BUILDINGS[bld.buildingType].name}!`,
+          'info',
+        );
         return;
       }
 
@@ -1991,14 +2197,25 @@ export class StonewalkerGame {
     this.refreshSelectionUI();
   }
 
-  /**
-   * Updates the Orders bar's `📊 Stats` and `✕ Cancel` buttons and renders the stats popup
-   * if `this.selectionBar.isPopupOpen()` is true.
-   */
   private refreshSelectionUI(): void {
-    const selectedIds = this.commandResolver.getSelectedIds();
-    const hasSelection = selectedIds.length > 0;
+    const rawIds = this.commandResolver.getSelectedIds();
+    const validIds: EntityId[] = [];
+    for (const id of rawIds) {
+      const u = this.units.get(id);
+      if (u && u.hp > 0 && !u.isReviving) {
+        validIds.push(id);
+        continue;
+      }
+      const b = this.buildings.get(id);
+      if (b && b.hp > 0) {
+        validIds.push(id);
+      }
+    }
+    if (validIds.length !== rawIds.length) {
+      this.commandResolver.setSelectedIds(validIds);
+    }
 
+    const hasSelection = validIds.length > 0;
     if (!hasSelection) {
       this.selectionBar.setPopupOpen(false);
     }
@@ -2026,20 +2243,20 @@ export class StonewalkerGame {
         statsLabel.textContent = isOpen ? 'Hide' : 'Stats';
       }
       if (countBadge) {
-        countBadge.textContent = String(selectedIds.length);
-        countBadge.style.display = selectedIds.length > 1 ? 'flex' : 'none';
+        countBadge.textContent = String(validIds.length);
+        countBadge.style.display = validIds.length > 1 ? 'flex' : 'none';
       }
     }
 
     this.selectionBar.render(
-      selectedIds,
+      validIds,
       this.units,
       this.buildings,
       this.factions.get('player'),
     );
 
     const ringItems: Array<{ position: Vec2; radius: number }> = [];
-    for (const id of selectedIds) {
+    for (const id of validIds) {
       const u = this.units.get(id);
       if (u && u.hp > 0) {
         ringItems.push({
@@ -2122,6 +2339,9 @@ export class StonewalkerGame {
     this.weather.update(dt, this.rng);
 
     const playerState = this.factions.get('player')!;
+    const activeDifficulty = this.currentLevel.enemyDifficulty;
+    const aiGatherMult =
+      BALANCE.AI_DIFFICULTY[activeDifficulty].gatherMultiplier;
 
     for (const fState of this.factions.values()) {
       HousingSystem.recomputeCaps(
@@ -2135,10 +2355,12 @@ export class StonewalkerGame {
         this.bus,
         dt,
       );
+      const effectivePassiveDt =
+        fState.faction === 'player' ? dt : dt * aiGatherMult;
       GatheringSystem.updatePassiveBuildingYields(
         fState,
         this.buildings.values(),
-        dt,
+        effectivePassiveDt,
       );
       TechSystem.update(
         fState,
@@ -2202,6 +2424,9 @@ export class StonewalkerGame {
         'player',
         this.world.relics.getBonusMultiplier('player', 'gather_speed'),
       ],
+      ['enemy_1', aiGatherMult],
+      ['enemy_2', aiGatherMult],
+      ['enemy_3', aiGatherMult],
     ]);
     WorkerAI.update(
       this.units.values(),
@@ -2295,6 +2520,24 @@ export class StonewalkerGame {
         }
       },
     );
+
+    for (const [bldId, bld] of this.buildings.entries()) {
+      if (bld.hp <= 0 && bld.buildingType !== 'base') {
+        this.world.grid.setBuildingFootprint(bld.tile, bld.footprint, null);
+        const mesh = this.buildingMeshes.get(bldId);
+        if (mesh) {
+          this.entityGroup.remove(mesh);
+          this.buildingMeshes.delete(bldId);
+        }
+        this.effects.spawnFloatingText(
+          '💥',
+          bld.position,
+          '#ff4d40',
+          this.world.heightMap,
+        );
+        this.buildings.delete(bldId);
+      }
+    }
 
     const playerPositions: Vec2[] = [];
     for (const u of this.units.values()) {

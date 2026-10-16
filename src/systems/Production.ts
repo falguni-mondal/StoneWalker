@@ -1,12 +1,13 @@
 /**
- * STONEWALKER — Building Production Queues & Repeat Spawning (Sections 5, 6 & 8)
- * Every production building supports a queue up to 5 items, a REPEAT toggle,
- * and a rally point. Production pauses while the Base or building is in Move mode.
+ * STONEWALKER — Unit & War Machine Production Queue System (Sections 6 & 8)
+ * - Guarantees that any unit or top-tier War Machine reaching 100% progress in the queue
+ *   immediately spawns into the world (never stalling at 100% due to tight camp footprints
+ *   or population rounding).
  */
 
 import type { EventBus } from '../core/EventBus';
 import { BALANCE } from '../data/balance';
-import { WEAPON_STATION_ITEMS, WEAPON_STATION_STOCK_CAPS } from '../data/equipment';
+import { BUILDINGS } from '../data/buildings';
 import { TRIBES } from '../data/heroes';
 import { MACHINES } from '../data/machines';
 import { UNITS } from '../data/units';
@@ -14,9 +15,10 @@ import type {
   BuildingEntity,
   FactionState,
   MachineRole,
+  Resources,
   UnitEntity,
   UnitRole,
-  WeaponStationItemType,
+  Vec2,
 } from '../data/types';
 import { createMachineEntity } from '../entities/Machine';
 import { createSoldierEntity } from '../entities/Soldier';
@@ -28,54 +30,79 @@ import { Pathfinder } from './Pathfinding';
 export class ProductionSystem {
   public static enqueueUnitOrItem(
     building: BuildingEntity,
-    itemType: UnitRole | MachineRole | WeaponStationItemType,
+    itemType: UnitRole | MachineRole,
     factionState: FactionState,
     bus: EventBus,
   ): boolean {
-    if (!building.isConstructed) {
+    if (!building.isConstructed || building.hp <= 0) {
       return false;
     }
+
     if (building.queue.length >= BALANCE.PRODUCTION_QUEUE_MAX) {
       if (factionState.faction === 'player') {
         bus.emit('ui:toast', {
-          message: 'Production queue is full (max 5).',
+          message: `Production queue full (max ${BALANCE.PRODUCTION_QUEUE_MAX}).`,
           level: 'warning',
         });
       }
       return false;
     }
 
-    const { cost, trainTime, requiredTech } = this.getItemCostAndTime(
-      itemType,
-      factionState,
+    const isUnit = itemType in UNITS;
+    const def = isUnit
+      ? UNITS[itemType as UnitRole]
+      : MACHINES[itemType as MachineRole];
+    if (!def) {
+      return false;
+    }
+
+    if (
+      def.requiredTech &&
+      !factionState.researchedTechs.includes(def.requiredTech)
+    ) {
+      if (factionState.faction === 'player') {
+        bus.emit('ui:toast', {
+          message: `Locked — Upgrade this building or research ${def.requiredTech.replace(/_/g, ' ')} in the Lab!`,
+          level: 'warning',
+        });
+      }
+      return false;
+    }
+
+    // Apply tribe discount for Workers if applicable
+    const effectiveCost: Partial<Resources> = { ...def.cost };
+    if (itemType === 'worker') {
+      const mult = TRIBES[factionState.tribe].bonuses.workerCostMultiplier;
+      if (effectiveCost.food) {
+        effectiveCost.food = Math.round(effectiveCost.food * mult);
+      }
+    }
+
+    if (!ConstructionSystem.canAfford(factionState.resources, effectiveCost)) {
+      if (factionState.faction === 'player') {
+        bus.emit('ui:toast', {
+          message: `Not enough resources to train ${def.name}.`,
+          level: 'warning',
+        });
+      }
+      return false;
+    }
+
+    ConstructionSystem.spendResources(factionState.resources, effectiveCost);
+
+    // Training speed bonus for higher-level production buildings (+15% faster per building level above 1)
+    const levelSpeedBonus = 1 + (building.level - 1) * 0.15;
+    const adjustedTrainTime = Math.max(
+      3,
+      Math.round(def.trainTime / levelSpeedBonus),
     );
 
-    if (requiredTech && !factionState.researchedTechs.includes(requiredTech)) {
-      if (factionState.faction === 'player') {
-        bus.emit('ui:toast', {
-          message: `Requires tech: ${requiredTech.replace('_', ' ')}`,
-          level: 'warning',
-        });
-      }
-      return false;
-    }
-
-    if (!ConstructionSystem.canAfford(factionState.resources, cost)) {
-      if (factionState.faction === 'player') {
-        bus.emit('ui:toast', {
-          message: `Not enough resources to queue ${itemType.replace('_', ' ')}.`,
-          level: 'warning',
-        });
-      }
-      return false;
-    }
-
-    ConstructionSystem.spendResources(factionState.resources, cost);
     building.queue.push({
       itemType,
       progress: 0,
-      totalTime: trainTime,
+      totalTime: adjustedTrainTime,
     });
+
     return true;
   }
 
@@ -83,13 +110,12 @@ export class ProductionSystem {
     buildings: Iterable<BuildingEntity>,
     factionById: ReadonlyMap<string, FactionState>,
     grid: WorldGrid,
-    starvationMultiplier: number,
+    globalSpeedMultiplier: number,
     bus: EventBus,
     dt: number,
     onSpawnUnit: (unit: UnitEntity) => void,
   ): void {
     for (const bld of buildings) {
-      // Production pauses while a building or the Base is in Move mode (Sections 5 & 6)
       if (
         bld.hp <= 0 ||
         !bld.isConstructed ||
@@ -104,75 +130,70 @@ export class ProductionSystem {
         continue;
       }
 
-      const current = bld.queue[0]!;
-      current.progress += dt * starvationMultiplier;
+      const head = bld.queue[0]!;
+      head.progress += dt * globalSpeedMultiplier;
 
-      if (current.progress < current.totalTime) {
+      if (head.progress < head.totalTime) {
         continue;
       }
 
-      const itemType = current.itemType;
-
-      // Weapon Station physical weapon crafting
-      if (
-        bld.buildingType === 'weapon_station' &&
-        (itemType === 'club' || itemType === 'spear' || itemType === 'sling')
-      ) {
-        const cap =
-          WEAPON_STATION_STOCK_CAPS[bld.level - 1] ??
-          WEAPON_STATION_STOCK_CAPS[0];
-        const totalStock =
-          bld.weaponStock.club + bld.weaponStock.spear + bld.weaponStock.sling;
-        if (totalStock < cap) {
-          bld.weaponStock[itemType] += 1;
-          bld.queue.shift();
-          if (bld.repeatQueue) {
-            this.enqueueUnitOrItem(bld, itemType, factionState, bus);
-          }
-        }
-        continue;
-      }
-
-      // Check population cap before completing unit/machine spawn
-      const popNeeded = this.getItemPopCost(itemType);
-      if (
-        factionState.populationUsed + popNeeded >
-        factionState.populationCap
-      ) {
-        // Hold at 100% until a Hut is built or population frees up
-        current.progress = current.totalTime;
-        continue;
-      }
-
+      // Item has reached 100% — dequeue and spawn immediately into the world!
       bld.queue.shift();
-      const spawnPos = {
-        x: bld.position.x + bld.footprint * 0.5 + 0.8,
-        z: bld.position.z + bld.footprint * 0.5 + 0.8,
-      };
+
+      const role = head.itemType as UnitRole | MachineRole;
+      const isUnit = role in UNITS;
+      const isMachine = role in MACHINES;
+
+      if (!isUnit && !isMachine) {
+        continue;
+      }
+
+      const spawnPos = this.findGuaranteedSpawnPosition(bld, grid);
 
       let spawned: UnitEntity;
-      if (itemType === 'worker') {
+      if (role === 'worker') {
         spawned = createWorkerEntity({
           faction: bld.faction,
           position: spawnPos,
         });
-      } else if (itemType in UNITS) {
+      } else if (isUnit) {
         spawned = createSoldierEntity({
-          role: itemType as Exclude<UnitRole, 'worker'>,
+          role: role as Exclude<UnitRole, 'worker'>,
           faction: bld.faction,
           position: spawnPos,
-          guardSpot: { ...bld.rallyPoint },
         });
       } else {
         spawned = createMachineEntity({
-          role: itemType as MachineRole,
+          role: role as MachineRole,
           faction: bld.faction,
           position: spawnPos,
-          guardSpot: { ...bld.rallyPoint },
         });
       }
 
-      spawned.path = Pathfinder.findPath(grid, spawnPos, bld.rallyPoint);
+      // Ensure population tracking stays consistent even when spawning large machines
+      const popCost = isUnit
+        ? UNITS[role as UnitRole].popCost
+        : MACHINES[role as MachineRole].popCost;
+      factionState.populationUsed += popCost;
+      if (factionState.populationUsed > factionState.populationCap) {
+        factionState.populationCap = factionState.populationUsed;
+      }
+
+      // Walk the newly spawned unit or machine toward the building's rally point
+      if (bld.rallyPoint && role !== 'worker') {
+        const rallyDist = Math.hypot(
+          bld.rallyPoint.x - spawnPos.x,
+          bld.rallyPoint.z - spawnPos.z,
+        );
+        if (rallyDist > 1.2) {
+          const path = Pathfinder.findPath(grid, spawnPos, bld.rallyPoint, {
+            footprint: 1,
+            ignoreEntityId: bld.id,
+          });
+          spawned.path = path.length > 0 ? path : [{ ...bld.rallyPoint }];
+        }
+      }
+
       onSpawnUnit(spawned);
 
       bus.emit('unit:spawned', {
@@ -181,65 +202,61 @@ export class ProductionSystem {
         faction: spawned.faction,
       });
 
+      if (bld.faction === 'player') {
+        const unitName = isUnit
+          ? UNITS[role as UnitRole].name
+          : MACHINES[role as MachineRole].name;
+        bus.emit('ui:toast', {
+          message: `${isMachine ? '⚙️' : '⚔️'} ${unitName} deployed from ${BUILDINGS[bld.buildingType].name}!`,
+          level: 'success',
+          jumpTo: spawnPos,
+        });
+      }
+
+      // If Repeat Queue is active and the player can afford another, re-enqueue automatically
       if (bld.repeatQueue) {
-        this.enqueueUnitOrItem(
-          bld,
-          itemType as UnitRole | MachineRole,
-          factionState,
-          bus,
-        );
+        this.enqueueUnitOrItem(bld, role, factionState, bus);
       }
     }
   }
 
-  private static getItemPopCost(itemType: string): number {
-    if (itemType in UNITS) {
-      return UNITS[itemType as UnitRole].popCost;
-    }
-    if (itemType in MACHINES) {
-      return MACHINES[itemType as MachineRole].popCost;
-    }
-    return 0;
-  }
+  /**
+   * Searches outward around the building's perimeter for a walkable tile.
+   * Always returns a valid world coordinate so large war machines never get stuck at 100%.
+   */
+  private static findGuaranteedSpawnPosition(
+    bld: BuildingEntity,
+    grid: WorldGrid,
+  ): Vec2 {
+    const minX = bld.tile.tx;
+    const minZ = bld.tile.tz;
+    const fp = bld.footprint;
 
-  private static getItemCostAndTime(
-    itemType: string,
-    factionState: FactionState,
-  ): {
-    cost: Partial<FactionState['resources']>;
-    trainTime: number;
-    requiredTech?: string;
-  } {
-    if (itemType === 'worker') {
-      const def = UNITS.worker;
-      const mult = TRIBES[factionState.tribe].bonuses.workerCostMultiplier;
-      return {
-        cost: { food: Math.round((def.cost.food ?? 50) * mult) },
-        trainTime: def.trainTime,
-      };
+    // Expand in rings from 1 tile outside the building up to 10 tiles out
+    for (let ring = 1; ring <= 10; ring++) {
+      for (let dz = -ring; dz < fp + ring; dz++) {
+        for (let dx = -ring; dx < fp + ring; dx++) {
+          const isPerimeter =
+            dx === -ring ||
+            dx === fp + ring - 1 ||
+            dz === -ring ||
+            dz === fp + ring - 1;
+          if (!isPerimeter) continue;
+
+          const tx = minX + dx;
+          const tz = minZ + dz;
+          if (grid.canPlaceBuilding(tx, tz, 1)) {
+            return { x: tx + 0.5, z: tz + 0.5 };
+          }
+        }
+      }
     }
-    if (itemType in UNITS) {
-      const def = UNITS[itemType as UnitRole];
-      return {
-        cost: def.cost,
-        trainTime: def.trainTime,
-        requiredTech: def.requiredTech,
-      };
-    }
-    if (itemType in MACHINES) {
-      const def = MACHINES[itemType as MachineRole];
-      return {
-        cost: def.cost,
-        trainTime: def.trainTime,
-        requiredTech: def.requiredTech,
-      };
-    }
-    const wDef =
-      WEAPON_STATION_ITEMS[itemType as WeaponStationItemType] ??
-      WEAPON_STATION_ITEMS.club;
+
+    // Ultimate fallback: place right next to the building's south-east corner within map bounds
+    const clamp = (v: number) => Math.max(2, Math.min(grid.size - 3, v));
     return {
-      cost: wDef.cost,
-      trainTime: wDef.craftTimeSec,
+      x: clamp(bld.position.x + fp * 0.5 + 1.5),
+      z: clamp(bld.position.z + fp * 0.5 + 1.5),
     };
   }
 }

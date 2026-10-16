@@ -1,7 +1,6 @@
 /**
  * STONEWALKER — Unified Single-Flow Mobile-Friendly Top Resource & Utility Bar
- * Merges resource chips and utility icon buttons into a single wrapping flex strip
- * so utility buttons fill all remaining space on row 1 before wrapping cleanly.
+ * Includes one-tap Save (💾), Load (📂), Restart Level (🔄), Rotate (↻), Pause (⏸), and Menu (☰).
  */
 
 import type { DayNightLighting } from '../core/DayNight';
@@ -18,6 +17,7 @@ export interface HUDCallbacks {
   onTogglePause: () => boolean;
   onSaveGame: () => void;
   onLoadGame: () => void;
+  onRestartLevel: () => void;
   onOpenMainMenu: () => void;
   onJumpToPosition: (pos: Vec2) => void;
 }
@@ -83,7 +83,6 @@ export class HUD {
   }
 
   private buildDOM(): void {
-    // Single unified flex container so items pack tightly across the full width with zero wasted space
     const brandChip = document.createElement('button');
     brandChip.className = 'sw-btn top-icon-btn';
     brandChip.innerHTML = `<span style="color:var(--accent-gold);font-weight:900;">⚔</span>`;
@@ -170,6 +169,12 @@ export class HUD {
     loadBtn.textContent = '📂';
     loadBtn.addEventListener('click', () => this.callbacks.onLoadGame());
 
+    const restartBtn = document.createElement('button');
+    restartBtn.className = 'sw-btn sw-btn-danger top-icon-btn';
+    restartBtn.title = 'Restart Current Level';
+    restartBtn.textContent = '🔄';
+    restartBtn.addEventListener('click', () => this.callbacks.onRestartLevel());
+
     const rotateBtn = document.createElement('button');
     rotateBtn.className = 'sw-btn top-icon-btn';
     rotateBtn.title = 'Rotate Camera 90° (Q/E)';
@@ -196,6 +201,7 @@ export class HUD {
       this.weatherEl,
       saveBtn,
       loadBtn,
+      restartBtn,
       rotateBtn,
       this.pauseBtn,
       menuBtn,
@@ -263,7 +269,7 @@ export class HUD {
               const jumpAttr = o.objective.targetPosition
                 ? `data-jump-x="${o.objective.targetPosition.x}" data-jump-z="${o.objective.targetPosition.z}" style="color:${color};cursor:pointer;text-decoration:underline;"`
                 : `style="color:${color};"`;
-              return `<div ${jumpAttr}>${check} ${o.objective.description}</div>`;
+              return `<div ${jumpAttr}>${check}${o.objective.description}</div>`;
             })
             .join('');
 
@@ -293,8 +299,8 @@ export class HUD {
 
     if (this.debugVisible) {
       this.debugPanel.innerHTML = `
-        <div><strong>FPS:</strong> ${debugStats.fps} · <strong>Entities:</strong> ${debugStats.entityCount}</div>
-        <div><strong>Seed:</strong> ${debugStats.seed} · <strong>AI:</strong> ${debugStats.aiState}</div>
+        <div><strong>FPS:</strong> ${debugStats.fps} · <strong>Entities:</strong>${debugStats.entityCount}</div>
+        <div><strong>Seed:</strong> ${debugStats.seed} · <strong>AI:</strong>${debugStats.aiState}</div>
       `;
     }
   }

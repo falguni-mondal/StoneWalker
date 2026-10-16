@@ -1,5 +1,8 @@
 /**
  * STONEWALKER — Building Placement, Base-Level Unlock Checks & Worker Repair System (Section 6)
+ * - Preserves `worker.jobMemory.resourceType` when finishing a build or repair job so the
+ *   worker immediately resumes harvesting the resource they were working on before building.
+ * - Immediately releases workers walking toward a building that was already finished by another worker.
  */
 
 import type { EventBus } from '../core/EventBus';
@@ -204,10 +207,24 @@ export class ConstructionSystem {
       return;
     }
 
+    worker.targetEntityId = null;
+
     const targetId = worker.jobMemory.targetEntityId;
     const bld = targetId ? buildings.get(targetId) : undefined;
-    if (!bld || bld.hp <= 0) {
+
+    // If the building was destroyed OR already finished/repaired to 100%, free the worker
+    // immediately (preserving `worker.jobMemory.resourceType` so they resume gathering!)
+    if (
+      !bld ||
+      bld.hp <= 0 ||
+      bld.faction !== worker.faction ||
+      (bld.isConstructed && bld.hp >= bld.maxHp)
+    ) {
+      worker.path = [];
+      worker.moveTarget = null;
       worker.jobMemory.jobType = 'none';
+      worker.jobMemory.targetEntityId = null;
+      worker.jobMemory.targetPosition = null;
       worker.status = 'idle';
       return;
     }
@@ -216,12 +233,16 @@ export class ConstructionSystem {
       bld.position.x - worker.position.x,
       bld.position.z - worker.position.z,
     );
-    const reach = bld.footprint * 0.5 + 1.5;
+    const reach = bld.footprint * 0.75 + 2.2;
 
     if (dist > reach) {
       if (worker.path.length === 0) {
         worker.status = 'working';
-        worker.path = Pathfinder.findPath(grid, worker.position, bld.position);
+        const path = Pathfinder.findPath(grid, worker.position, bld.position, {
+          footprint: 1,
+          ignoreEntityId: bld.id,
+        });
+        worker.path = path.length > 0 ? path : [{ ...bld.position }];
       }
       return;
     }
@@ -238,6 +259,7 @@ export class ConstructionSystem {
 
       if (bld.constructionProgress >= bld.constructionTotalTime) {
         bld.isConstructed = true;
+        bld.constructionProgress = bld.constructionTotalTime;
         bld.hp = bld.maxHp;
         bus.emit('building:completed', {
           buildingId: bld.id,
@@ -250,18 +272,24 @@ export class ConstructionSystem {
             level: 'success',
           });
         }
+        // Clear build target while keeping `worker.jobMemory.resourceType` intact
+        worker.path = [];
+        worker.moveTarget = null;
         worker.jobMemory.jobType = 'none';
+        worker.jobMemory.targetEntityId = null;
+        worker.jobMemory.targetPosition = null;
         worker.status = 'idle';
       }
     } else if (bld.hp < bld.maxHp) {
-      bld.hp = Math.min(bld.maxHp, bld.hp + 18 * dt);
+      bld.hp = Math.min(bld.maxHp, bld.hp + 24 * dt);
       if (bld.hp >= bld.maxHp) {
+        worker.path = [];
+        worker.moveTarget = null;
         worker.jobMemory.jobType = 'none';
+        worker.jobMemory.targetEntityId = null;
+        worker.jobMemory.targetPosition = null;
         worker.status = 'idle';
       }
-    } else {
-      worker.jobMemory.jobType = 'none';
-      worker.status = 'idle';
     }
   }
 }

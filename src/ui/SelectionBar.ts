@@ -1,10 +1,8 @@
 /**
- * STONEWALKER — Event-Safe Realtime Stats & Orders Popup
- * - Only opens when the player clicks the floating follower icon around a selected entity.
- * - Uses smart DOM diffing (`lastStructureKey`) so `innerHTML` is ONLY rebuilt when the
- *   selected entity, level, mode, or stance changes—while live HP and queue progress update
- *   in-place! This guarantees that every button click (Upgrade, Stop, Walk Mode, Train)
- *   registers 100% reliably on the first tap/click.
+ * STONEWALKER — Event-Safe Realtime Stats & Orders Popup (with Destroy Building Option)
+ * - Uses smart DOM diffing (`lastStructureKey`) so `innerHTML` is only rebuilt when state
+ *   changes, while live HP and queue progress update in-place.
+ * - Includes a `🗑️ Destroy` button on buildings to demolish them and refund 50% resources.
  */
 
 import { BASE_TIER_STATS, BUILDINGS } from '../data/buildings';
@@ -28,6 +26,7 @@ export interface SelectionBarCallbacks {
   onTrainItem: (buildingId: EntityId, itemType: string) => void;
   onToggleRepeatQueue: (buildingId: EntityId) => void;
   onUpgradeBuilding: (buildingId: EntityId) => void;
+  onDestroyBuilding: (buildingId: EntityId) => void;
   onToggleUnitStance: () => void;
   onStopSelected: () => void;
   onCollapse: () => void;
@@ -180,7 +179,6 @@ export class SelectionBar {
     const structKey = `bld:${bld.id}:lv${bld.level}:m${bld.mode}:c${bld.isConstructed}:r${bld.repeatQueue}:q[${queueSig}]:t[${techSig}]:est[${this.travelEstimateText ?? ''}]`;
 
     if (this.lastStructureKey === structKey) {
-      // Update live HP bar, HP text, and queue progress bar in-place without touching buttons!
       const hpBar = this.container.querySelector(
         '#sel-live-hp-bar',
       ) as HTMLElement | null;
@@ -308,6 +306,8 @@ export class SelectionBar {
       }
     }
 
+    const canDestroy = bld.buildingType !== 'base';
+
     this.container.innerHTML = `
       <div class="inspector-top">
         <div class="inspector-portrait">${this.getPortraitSvg(bld.buildingType)}</div>
@@ -360,7 +360,14 @@ export class SelectionBar {
               </button>`
             : ''
         }
-        <button id="sel-stop" class="sw-btn sw-btn-danger" style="min-height:36px;font-size:0.75rem;">⏹ Stop</button>
+        <button id="sel-stop" class="sw-btn" style="min-height:36px;font-size:0.75rem;">⏹ Stop</button>
+        ${
+          canDestroy
+            ? `<button id="sel-destroy-bld" class="sw-btn sw-btn-danger" style="min-height:36px;font-size:0.75rem;" title="Demolish Building (+50% Resource Refund)">
+                🗑️ Destroy
+              </button>`
+            : ''
+        }
       </div>
     `;
 
@@ -388,6 +395,11 @@ export class SelectionBar {
     this.container
       .querySelector('#sel-stop')
       ?.addEventListener('click', () => this.callbacks.onStopSelected());
+    this.container
+      .querySelector('#sel-destroy-bld')
+      ?.addEventListener('click', () =>
+        this.callbacks.onDestroyBuilding(bld.id),
+      );
 
     this.container.querySelectorAll('[data-train-role]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -435,7 +447,7 @@ export class SelectionBar {
         '#sel-unit-load-text',
       ) as HTMLElement | null;
       if (loadEl) {
-        loadEl.textContent = `${Math.floor(unit.carryAmount)} ${unit.carryResourceType ?? ''}`;
+        loadEl.textContent = `${Math.floor(unit.carryAmount)}${unit.carryResourceType ?? ''}`;
       }
       return;
     }
@@ -481,7 +493,7 @@ export class SelectionBar {
       machineDef && machineDef.spawnsCrawler
         ? `<div class="stat-pill"><span>🕷 CRAWLERS</span><strong>${unit.activeCrawlerIds.length}/8</strong></div>`
         : unit.role === 'worker'
-          ? `<div class="stat-pill"><span>🎒 LOAD</span><strong id="sel-unit-load-text">${Math.floor(unit.carryAmount)} ${unit.carryResourceType ?? ''}</strong></div>`
+          ? `<div class="stat-pill"><span>🎒 LOAD</span><strong id="sel-unit-load-text">${Math.floor(unit.carryAmount)}${unit.carryResourceType ?? ''}</strong></div>`
           : `<div class="stat-pill"><span>🎯 RANGE</span><strong>${rngVal.toFixed(1)}</strong></div>`;
 
     this.container.innerHTML = `
@@ -490,7 +502,7 @@ export class SelectionBar {
         <div style="flex:1;min-width:0;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
             <strong style="font-size:0.96rem;color:var(--accent-gold);">
-              ${name} ${'★'.repeat(unit.veterancyRank)}
+              ${name}${'★'.repeat(unit.veterancyRank)}
             </strong>
             <button id="sel-close" class="sw-btn" style="min-height:28px;min-width:28px;padding:2px 8px;">✕</button>
           </div>
@@ -504,8 +516,7 @@ export class SelectionBar {
       <div class="stat-pill-grid">
         <div class="stat-pill"><span>❤️ HP</span><strong id="sel-unit-hp-text">${Math.ceil(unit.hp)}/${unit.maxHp}</strong></div>
         <div class="stat-pill"><span>⚔ ATK (T${wTier})</span><strong>${atkVal}</strong></div>
-        <div class="stat-pill"><span>🛡 ARM (T${aTier})</span><strong>${armVal}</strong></div>
-        ${fourthPill}
+        <div class="stat-pill"><span>🛡 ARM (T${aTier})</span><strong>${armVal}</strong></div>${fourthPill}
       </div>
 
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:space-between;">

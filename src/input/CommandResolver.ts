@@ -1,13 +1,13 @@
 /**
- * STONEWALKER — Touch & Mouse Command Resolver (Sections 5, 6, 9 & 14)
- * Fixes Worker build/repair targeting when clicking damaged/unfinished friendly buildings
- * and cleanly separates selection from contextual movement/gather/attack orders.
+ * STONEWALKER — Context-Sensitive Command & Selection Resolver (Section 11)
+ * - Guarantees that tapping a friendly unfinished or damaged building with selected workers
+ *   assigns them to build/repair it (`targetEntityId = null`) and NEVER orders an attack on
+ *   friendly structures or units.
  */
 
-import { CONFIG } from '../config';
 import type { EventBus } from '../core/EventBus';
 import { BUILDINGS } from '../data/buildings';
-import { getBaseEffectiveStats } from '../entities/Base';
+import { TRIBES } from '../data/heroes';
 import type {
   BuildingEntity,
   EntityId,
@@ -16,20 +16,26 @@ import type {
   UnitEntity,
   Vec2,
 } from '../data/types';
-import { Pathfinder, type PathPreviewResult } from '../systems/Pathfinding';
+import { Pathfinder } from '../systems/Pathfinding';
 import type { WorldGrid } from '../world/Grid';
 
-export interface CommandWorldContext {
-  units: Map<EntityId, UnitEntity>;
-  buildings: Map<EntityId, BuildingEntity>;
-  resources: ResourceNodeEntity[];
+export interface CommandContext {
+  units: ReadonlyMap<EntityId, UnitEntity>;
+  buildings: ReadonlyMap<EntityId, BuildingEntity>;
+  resources: Iterable<ResourceNodeEntity>;
   grid: WorldGrid;
   playerTribe: TribeId;
 }
 
+export interface PathPreviewResult {
+  path: Vec2[];
+  estimatedSeconds: number;
+  isBlocked: boolean;
+}
+
 export class CommandResolver {
-  private readonly bus: EventBus;
   private selectedIds: EntityId[] = [];
+  private readonly bus: EventBus;
 
   public constructor(bus: EventBus) {
     this.bus = bus;
@@ -39,30 +45,26 @@ export class CommandResolver {
     return this.selectedIds;
   }
 
-  public setSelectedIds(ids: readonly EntityId[]): void {
+  public setSelectedIds(ids: EntityId[]): void {
     this.selectedIds = [...ids];
     this.bus.emit('selection:changed', { selectedIds: this.selectedIds });
   }
 
   public clearSelection(): void {
-    if (this.selectedIds.length === 0) {
-      return;
+    if (this.selectedIds.length > 0) {
+      this.selectedIds = [];
+      this.bus.emit('selection:changed', { selectedIds: [] });
     }
-    this.selectedIds = [];
-    this.bus.emit('selection:changed', { selectedIds: [] });
   }
 
-  public hasSelectedPlayerWorkers(ctx: CommandWorldContext): boolean {
-    for (const id of this.selectedIds) {
+  public hasSelectedPlayerWorkers(ctx: CommandContext): boolean {
+    return this.selectedIds.some((id) => {
       const u = ctx.units.get(id);
-      if (u && u.hp > 0 && u.faction === 'player' && u.role === 'worker') {
-        return true;
-      }
-    }
-    return false;
+      return u && u.hp > 0 && u.faction === 'player' && u.role === 'worker';
+    });
   }
 
-  public hasSelectedUnitsOrMovingBuilding(ctx: CommandWorldContext): boolean {
+  public hasSelectedUnitsOrMovingBuilding(ctx: CommandContext): boolean {
     for (const id of this.selectedIds) {
       const u = ctx.units.get(id);
       if (u && u.hp > 0 && u.faction === 'player') {
@@ -78,61 +80,74 @@ export class CommandResolver {
 
   public findEntitiesNearPoint(
     worldPos: Vec2,
-    ctx: CommandWorldContext,
-  ): Array<{ id: EntityId; label: string; dist: number }> {
-    const hits: Array<{ id: EntityId; label: string; dist: number }> = [];
-    const radius = CONFIG.TOUCH_FORGIVING_SELECT_RADIUS;
+    ctx: CommandContext,
+    radius: number = 1.9,
+  ): Array<{ kind: 'unit' | 'building' | 'resource'; id: EntityId; dist: number }> {
+    const results: Array<{
+      kind: 'unit' | 'building' | 'resource';
+      id: EntityId;
+      dist: number;
+    }> = [];
 
     for (const u of ctx.units.values()) {
-      if (u.hp <= 0) {
-        continue;
-      }
-      const d = Math.hypot(u.position.x - worldPos.x, u.position.z - worldPos.z);
-      if (d <= radius) {
-        hits.push({ id: u.id, label: String(u.role), dist: d });
+      if (u.hp <= 0 || u.isReviving) continue;
+      const d = Math.hypot(
+        u.position.x - worldPos.x,
+        u.position.z - worldPos.z,
+      );
+      const hitRadius = u.kind === 'machine' ? radius + 0.8 : radius;
+      if (d <= hitRadius) {
+        results.push({ kind: 'unit', id: u.id, dist: d });
       }
     }
 
     for (const b of ctx.buildings.values()) {
-      if (b.hp <= 0) {
-        continue;
-      }
-      const half = b.footprint * 0.5 + 0.6;
-      const dx = Math.abs(b.position.x - worldPos.x);
-      const dz = Math.abs(b.position.z - worldPos.z);
-      if (dx <= half && dz <= half) {
-        const d = Math.hypot(
-          b.position.x - worldPos.x,
-          b.position.z - worldPos.z,
-        );
-        hits.push({
-          id: b.id,
-          label: BUILDINGS[b.buildingType].name,
-          dist: d,
-        });
+      if (b.hp <= 0) continue;
+      const d = Math.hypot(
+        b.position.x - worldPos.x,
+        b.position.z - worldPos.z,
+      );
+      if (d <= b.footprint * 0.65 + 0.8) {
+        results.push({ kind: 'building', id: b.id, dist: d });
       }
     }
 
-    hits.sort((a, b) => a.dist - b.dist);
-    return hits;
+    for (const r of ctx.resources) {
+      if (r.amountRemaining <= 0) continue;
+      const d = Math.hypot(
+        r.position.x - worldPos.x,
+        r.position.z - worldPos.z,
+      );
+      if (d <= 1.6) {
+        results.push({ kind: 'resource', id: r.id, dist: d });
+      }
+    }
+
+    results.sort((a, b) => a.dist - b.dist);
+    return results;
   }
 
-  public handleDoubleTap(worldPos: Vec2, ctx: CommandWorldContext): void {
-    const near = this.findEntitiesNearPoint(worldPos, ctx);
-    if (near.length === 0) {
+  public handleDoubleTap(worldPos: Vec2, ctx: CommandContext): void {
+    const hits = this.findEntitiesNearPoint(worldPos, ctx, 2.2);
+    const unitHit = hits.find((h) => h.kind === 'unit');
+    if (!unitHit) {
       return;
     }
-    const firstUnit = ctx.units.get(near[0]!.id);
-    if (!firstUnit || firstUnit.faction !== 'player') {
+    const targetUnit = ctx.units.get(unitHit.id);
+    if (!targetUnit || targetUnit.faction !== 'player') {
       return;
     }
+
     const matching: EntityId[] = [];
     for (const u of ctx.units.values()) {
       if (
         u.hp > 0 &&
         u.faction === 'player' &&
-        u.role === firstUnit.role &&
-        Math.hypot(u.position.x - worldPos.x, u.position.z - worldPos.z) <= 20
+        u.role === targetUnit.role &&
+        Math.hypot(
+          u.position.x - targetUnit.position.x,
+          u.position.z - targetUnit.position.z,
+        ) <= 22
       ) {
         matching.push(u.id);
       }
@@ -141,183 +156,233 @@ export class CommandResolver {
   }
 
   public handleBoxSelect(
-    startWorld: Vec2,
-    endWorld: Vec2,
-    ctx: CommandWorldContext,
+    minPos: Vec2,
+    maxPos: Vec2,
+    ctx: CommandContext,
   ): void {
-    const minX = Math.min(startWorld.x, endWorld.x);
-    const maxX = Math.max(startWorld.x, endWorld.x);
-    const minZ = Math.min(startWorld.z, endWorld.z);
-    const maxZ = Math.max(startWorld.z, endWorld.z);
+    const x0 = Math.min(minPos.x, maxPos.x);
+    const x1 = Math.max(minPos.x, maxPos.x);
+    const z0 = Math.min(minPos.z, maxPos.z);
+    const z1 = Math.max(minPos.z, maxPos.z);
 
-    const pickedUnits: EntityId[] = [];
+    const picked: EntityId[] = [];
     for (const u of ctx.units.values()) {
       if (
         u.hp > 0 &&
+        !u.isReviving &&
         u.faction === 'player' &&
-        u.position.x >= minX &&
-        u.position.x <= maxX &&
-        u.position.z >= minZ &&
-        u.position.z <= maxZ
+        u.position.x >= x0 &&
+        u.position.x <= x1 &&
+        u.position.z >= z0 &&
+        u.position.z <= z1
       ) {
-        pickedUnits.push(u.id);
+        picked.push(u.id);
       }
     }
-    if (pickedUnits.length > 0) {
-      this.setSelectedIds(pickedUnits);
+    if (picked.length > 0) {
+      this.setSelectedIds(picked);
     }
   }
 
   public issueContextCommand(
     worldPos: Vec2,
-    ctx: CommandWorldContext,
+    ctx: CommandContext,
   ): PathPreviewResult | null {
     if (this.selectedIds.length === 0) {
       return null;
     }
 
-    // 1. Check if an enemy entity was targeted
-    let targetEnemyId: EntityId | null = null;
-    for (const u of ctx.units.values()) {
-      if (
-        u.hp > 0 &&
-        u.faction !== 'player' &&
-        Math.hypot(u.position.x - worldPos.x, u.position.z - worldPos.z) <= 2.4
-      ) {
-        targetEnemyId = u.id;
-        break;
-      }
-    }
-    if (!targetEnemyId) {
-      for (const b of ctx.buildings.values()) {
-        if (
-          b.hp > 0 &&
-          b.faction !== 'player' &&
-          Math.abs(b.position.x - worldPos.x) <= b.footprint * 0.65 &&
-          Math.abs(b.position.z - worldPos.z) <= b.footprint * 0.65
-        ) {
-          targetEnemyId = b.id;
-          break;
-        }
-      }
-    }
-
-    // 2. Check if a resource node was targeted
-    let targetResource: ResourceNodeEntity | null = null;
-    for (const res of ctx.resources) {
-      if (
-        res.amountRemaining > 0 &&
-        Math.hypot(res.position.x - worldPos.x, res.position.z - worldPos.z) <=
-          2.0
-      ) {
-        targetResource = res;
-        break;
-      }
-    }
-
-    // 3. Check if an unfinished or damaged friendly building was targeted
-    let targetFriendlyBuilding: BuildingEntity | null = null;
-    for (const b of ctx.buildings.values()) {
-      if (
-        b.hp > 0 &&
-        b.faction === 'player' &&
-        (!b.isConstructed || b.hp < b.maxHp) &&
-        Math.abs(b.position.x - worldPos.x) <= b.footprint * 0.65 &&
-        Math.abs(b.position.z - worldPos.z) <= b.footprint * 0.65
-      ) {
-        targetFriendlyBuilding = b;
-        break;
-      }
-    }
-
-    let previewResult: PathPreviewResult | null = null;
-    let unitOffsetIndex = 0;
+    const hits = this.findEntitiesNearPoint(worldPos, ctx, 2.2);
+    const selectedUnits: UnitEntity[] = [];
+    const selectedBuildings: BuildingEntity[] = [];
 
     for (const id of this.selectedIds) {
-      const bld = ctx.buildings.get(id);
-      if (bld && bld.faction === 'player') {
-        if (bld.mode === 'move') {
-          const speed =
-            bld.buildingType === 'base'
-              ? getBaseEffectiveStats(bld, ctx.playerTribe).moveSpeed
-              : BUILDINGS[bld.buildingType].moveSpeed;
-          const preview = Pathfinder.computePathPreview(
-            ctx.grid,
-            bld.position,
-            worldPos,
-            speed,
-            {
-              footprint: bld.footprint,
-              ignoreEntityId: bld.id,
-              allowStompable: bld.buildingType === 'base',
-            },
-          );
-          bld.path = preview.path;
-          bld.moveTarget = worldPos;
-          previewResult = preview;
-        } else {
-          bld.rallyPoint = { x: worldPos.x, z: worldPos.z };
+      const u = ctx.units.get(id);
+      if (u && u.hp > 0 && u.faction === 'player') {
+        selectedUnits.push(u);
+      }
+      const b = ctx.buildings.get(id);
+      if (b && b.hp > 0 && b.faction === 'player') {
+        selectedBuildings.push(b);
+      }
+    }
+
+    // 1. Check if tapping a friendly unfinished or damaged building while Workers are selected
+    const bldHit = hits.find((h) => h.kind === 'building');
+    if (bldHit) {
+      const targetBld = ctx.buildings.get(bldHit.id);
+      if (targetBld && targetBld.faction === 'player') {
+        let assignedBuilder = false;
+        for (const u of selectedUnits) {
+          if (u.role === 'worker') {
+            u.targetEntityId = null;
+            u.jobMemory = {
+              jobType: !targetBld.isConstructed ? 'build' : 'repair',
+              targetEntityId: targetBld.id,
+              resourceType: u.jobMemory.resourceType ?? u.carryResourceType,
+              targetPosition: { ...targetBld.position },
+            };
+            u.status = 'working';
+            u.path = Pathfinder.findPath(
+              ctx.grid,
+              u.position,
+              targetBld.position,
+              {
+                footprint: 1,
+                ignoreEntityId: targetBld.id,
+              },
+            );
+            assignedBuilder = true;
+          }
         }
-        continue;
+        if (assignedBuilder) {
+          return {
+            path: [targetBld.position],
+            estimatedSeconds: 2,
+            isBlocked: false,
+          };
+        }
       }
+    }
 
-      const unit = ctx.units.get(id);
-      if (!unit || unit.faction !== 'player' || unit.hp <= 0) {
-        continue;
+    // 2. Check if tapping a Resource Node while Workers are selected
+    const resHit = hits.find((h) => h.kind === 'resource');
+    if (resHit) {
+      const rNode = Array.from(ctx.resources).find((r) => r.id === resHit.id);
+      if (rNode) {
+        let assignedHarvester = false;
+        for (const u of selectedUnits) {
+          if (u.role === 'worker') {
+            u.targetEntityId = null;
+            u.jobMemory = {
+              jobType: 'gather',
+              targetEntityId: rNode.id,
+              resourceType: rNode.resourceType,
+              targetPosition: { ...rNode.position },
+            };
+            u.status = 'working';
+            u.path = Pathfinder.findPath(ctx.grid, u.position, rNode.position);
+            assignedHarvester = true;
+          }
+        }
+        if (assignedHarvester) {
+          return {
+            path: [rNode.position],
+            estimatedSeconds: 2,
+            isBlocked: false,
+          };
+        }
       }
+    }
 
-      // Reset 15-second idle timer on any player command (Section 9A)
-      unit.idleTimer = 0;
+    // 3. Check if tapping an ENEMY Unit or ENEMY Building (strictly never friendly!)
+    for (const h of hits) {
+      if (h.kind === 'unit') {
+        const targetU = ctx.units.get(h.id);
+        if (targetU && targetU.faction !== 'player') {
+          for (const u of selectedUnits) {
+            u.targetEntityId = targetU.id;
+            u.status = 'fighting';
+            u.path = Pathfinder.findPath(
+              ctx.grid,
+              u.position,
+              targetU.position,
+            );
+          }
+          return {
+            path: [targetU.position],
+            estimatedSeconds: 2,
+            isBlocked: false,
+          };
+        }
+      } else if (h.kind === 'building') {
+        const targetB = ctx.buildings.get(h.id);
+        if (targetB && targetB.faction !== 'player') {
+          for (const u of selectedUnits) {
+            u.targetEntityId = targetB.id;
+            u.status = 'fighting';
+            u.path = Pathfinder.findPath(
+              ctx.grid,
+              u.position,
+              targetB.position,
+              {
+                footprint: 1,
+                ignoreEntityId: targetB.id,
+              },
+            );
+          }
+          return {
+            path: [targetB.position],
+            estimatedSeconds: 3,
+            isBlocked: false,
+          };
+        }
+      }
+    }
 
-      if (targetEnemyId) {
-        unit.targetEntityId = targetEnemyId;
-        unit.status = 'fighting';
-        unit.path = Pathfinder.findPath(ctx.grid, unit.position, worldPos, {
-          footprint: 1,
-          ignoreEntityId: unit.id,
+    // 4. Walking Buildings Movement Command
+    let previewResult: PathPreviewResult | null = null;
+    for (const bld of selectedBuildings) {
+      if (bld.mode === 'move') {
+        const path = Pathfinder.findPath(ctx.grid, bld.position, worldPos, {
+          footprint: bld.footprint,
+          ignoreEntityId: bld.id,
+          allowStompable: bld.buildingType === 'base',
         });
-      } else if (unit.role === 'worker' && targetFriendlyBuilding) {
-        unit.targetEntityId = targetFriendlyBuilding.id;
-        unit.status = 'working';
-        unit.jobMemory = {
-          jobType: targetFriendlyBuilding.isConstructed ? 'repair' : 'build',
-          targetEntityId: targetFriendlyBuilding.id,
-          resourceType: null,
-          targetPosition: { ...targetFriendlyBuilding.position },
-        };
-        unit.path = Pathfinder.findPath(
-          ctx.grid,
-          unit.position,
-          targetFriendlyBuilding.position,
+        bld.path = path;
+        bld.moveTarget = { ...worldPos };
+        const speed =
+          BUILDINGS[bld.buildingType].moveSpeed *
+          (bld.buildingType === 'base'
+            ? TRIBES[ctx.playerTribe].bonuses.baseMoveSpeedMultiplier
+            : 1.0);
+        const dist = Math.hypot(
+          worldPos.x - bld.position.x,
+          worldPos.z - bld.position.z,
         );
-      } else if (unit.role === 'worker' && targetResource) {
-        unit.targetEntityId = targetResource.id;
-        unit.status = 'working';
-        unit.jobMemory = {
-          jobType: 'gather',
-          targetEntityId: targetResource.id,
-          resourceType: targetResource.resourceType,
-          targetPosition: { ...targetResource.position },
+        previewResult = {
+          path,
+          estimatedSeconds: Math.max(1, Math.round(dist / Math.max(0.5, speed))),
+          isBlocked: path.length === 0,
         };
-        unit.path = Pathfinder.findPath(
-          ctx.grid,
-          unit.position,
-          targetResource.position,
-        );
       } else {
-        const angle = unitOffsetIndex * 2.39996;
-        const ring =
-          this.selectedIds.length > 1 ? Math.sqrt(unitOffsetIndex) * 0.9 : 0;
-        unitOffsetIndex++;
-        const dest: Vec2 = {
-          x: worldPos.x + Math.cos(angle) * ring,
-          z: worldPos.z + Math.sin(angle) * ring,
-        };
-        unit.targetEntityId = null;
-        unit.moveTarget = dest;
-        unit.status = 'moving';
-        unit.path = Pathfinder.findPath(ctx.grid, unit.position, dest);
+        bld.rallyPoint = { ...worldPos };
       }
+    }
+
+    // 5. Standard Ground Move Command for Selected Units
+    if (selectedUnits.length > 0) {
+      const cols = Math.ceil(Math.sqrt(selectedUnits.length));
+      selectedUnits.forEach((u, idx) => {
+        const row = Math.floor(idx / cols);
+        const col = idx % cols;
+        const offset: Vec2 = {
+          x: worldPos.x + (col - (cols - 1) * 0.5) * 1.15,
+          z: worldPos.z + (row - (cols - 1) * 0.5) * 1.15,
+        };
+        u.targetEntityId = null;
+        if (u.role === 'worker') {
+          u.jobMemory.jobType = 'none';
+          u.jobMemory.targetEntityId = null;
+        }
+        u.status = 'moving';
+        u.moveTarget = offset;
+        u.path = Pathfinder.findPath(ctx.grid, u.position, offset);
+      });
+
+      const lead = selectedUnits[0]!;
+      const dist = Math.hypot(
+        worldPos.x - lead.position.x,
+        worldPos.z - lead.position.z,
+      );
+      previewResult = {
+        path: lead.path,
+        estimatedSeconds: Math.max(
+          1,
+          Math.round(dist / Math.max(0.5, lead.speed)),
+        ),
+        isBlocked: lead.path.length === 0,
+      };
     }
 
     return previewResult;
