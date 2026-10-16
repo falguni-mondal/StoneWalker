@@ -1,11 +1,10 @@
 /**
  * STONEWALKER — Complete Production Game Coordinator
- * - Opens on the ByFalguni Welcome Screen (Play, Campaign, Skirmish, Saved Games, Settings, How to Play, Credits)
- * - Unlocks buildings progressively as you upgrade your Council Walker Base (Lv.1 -> Lv.2 -> Lv.3)
- * - Enforces a single non-overlapping vertical stack at the bottom-left:
- *   1. Top-Left of Orders: Semi-Transparent Radar Map (visible by default; toggled via Map icon)
- *   2. On Top of Actions: Orders Icon Bar (Hero ★, Defend, Idle, Box:OFF, Map:ON)
- *   3. Bottom: Actions Icon Bar (Build, Lab, Armory, Powers, Army, Camp)
+ * - 3-Slot Save/Load/Erase System: Auto-loads the player's most recent saved battle on startup
+ *   and auto-saves every 20 seconds to the active slot (Slot 1 by default, or Slot 2 / 3 if selected).
+ * - Floating Selection Follower Button: Selecting any unit, machine, or building shows a floating
+ *   "📊 Stats" button that follows it on screen; clicking it opens the event-safe realtime stats popup.
+ * - High-Visibility Emerald Green Building Grid Ghost & Living Enemy AI Base Expansion.
  */
 
 import * as THREE from 'three';
@@ -20,7 +19,11 @@ import { EventBus } from './core/EventBus';
 import { GameLoop } from './core/GameLoop';
 import { Haptics } from './core/Haptics';
 import { RNG } from './core/RNG';
-import { type SavedBattleSnapshot, SaveSystem } from './core/SaveSystem';
+import {
+  type SavedBattleSnapshot,
+  type SaveSlotIndex,
+  SaveSystem,
+} from './core/SaveSystem';
 import { SettingsManager } from './core/Settings';
 import { WeatherController } from './core/Weather';
 import { BALANCE } from './data/balance';
@@ -93,6 +96,8 @@ import { TutorialOverlay } from './ui/Tutorial';
 import { FogOfWar, type VisionEmitter } from './world/Fog';
 import { type GeneratedWorld, MapGenerator } from './world/MapGenerator';
 import { TerrainRenderer } from './world/TerrainMesh';
+
+const AUTOSAVE_INTERVAL_SEC = 20;
 
 export class StonewalkerGame {
   private readonly bus = new EventBus();
@@ -193,6 +198,14 @@ export class StonewalkerGame {
       (pos) => this.cameraRig.jumpTo(pos),
     );
 
+    // Initialize floating world-space "📊 Stats" follower button on selected units/buildings
+    this.effects.initSelectionFollowerButton(uiLayer, () => {
+      this.sfx.playTap();
+      this.haptics.tap();
+      this.selectionBar.togglePopup();
+      this.refreshSelectionUI();
+    });
+
     this.hud = new HUD(uiLayer, {
       onRotateCamera: () => {
         this.sfx.playTap();
@@ -209,41 +222,24 @@ export class StonewalkerGame {
       onSaveGame: () => {
         this.sfx.playBuildComplete();
         this.haptics.buildComplete();
-        this.performSave('manual');
-        this.performSave('auto');
+        const activeSlot = this.saveSystem.getActiveSlot();
+        this.performSave(activeSlot);
         this.notifications.pushToast(
-          '💾 Game & Progress Saved!',
+          `💾 Saved Game to Slot ${activeSlot}!`,
           'success',
         );
       },
       onLoadGame: () => {
         this.sfx.playTap();
-        const snap =
-          this.saveSystem.loadBattle('manual') ??
-          this.saveSystem.loadBattle('auto');
-        if (!snap) {
-          this.notifications.pushToast(
-            'No saved game found yet — tap 💾 Save first!',
-            'warning',
-          );
-          return;
-        }
-        this.restoreFromSnapshot(snap);
-        this.loop.setPaused(false);
-        this.hud.setPauseButtonLabel(false);
-        this.menus.hideAll();
-        this.notifications.pushToast(
-          '📂 Saved Game Loaded!',
-          'success',
-        );
+        this.loop.setPaused(true);
+        this.hud.setPauseButtonLabel(true);
+        this.menus.showSavedGamesModal();
       },
       onOpenMainMenu: () => {
         this.sfx.playTap();
         this.loop.setPaused(true);
         this.hud.setPauseButtonLabel(true);
-        const hasSave =
-          this.saveSystem.loadBattle('manual') !== null ||
-          this.saveSystem.loadBattle('auto') !== null;
+        const hasSave = this.saveSystem.loadMostRecentBattle() !== null;
         this.menus.showMainMenu(hasSave);
       },
       onJumpToPosition: (pos) => {
@@ -259,8 +255,6 @@ export class StonewalkerGame {
       this.cameraRig.jumpTo(worldPos);
     });
 
-    // Enforce exact non-overlapping vertical order:
-    // Top-left: Translucent Map (visible by default) -> Middle: Orders Bar -> Bottom: Actions Bar
     this.minimap.container.style.cssText = `
       position: relative;
       align-self: flex-start;
@@ -286,6 +280,7 @@ export class StonewalkerGame {
         this.sfx.playTap();
         this.haptics.tap();
         this.commandResolver.clearSelection();
+        this.selectionBar.setPopupOpen(false);
         this.refreshSelectionUI();
 
         this.pendingBuildType = bType;
@@ -463,6 +458,7 @@ export class StonewalkerGame {
             ? 'Tap or Right-Click ground to walk structure'
             : null,
         );
+        this.selectionBar.invalidate();
         this.refreshSelectionUI();
       },
       onRelocateSelectedBuildings: () => {
@@ -471,6 +467,7 @@ export class StonewalkerGame {
         this.selectionBar.setTravelEstimate(
           'Relocate Camp active: Tap or Right-Click destination',
         );
+        this.selectionBar.invalidate();
         this.refreshSelectionUI();
       },
       onTrainItem: (buildingId, itemType) => {
@@ -484,6 +481,7 @@ export class StonewalkerGame {
             playerState,
             this.bus,
           );
+          this.selectionBar.invalidate();
           this.refreshSelectionUI();
         }
       },
@@ -492,6 +490,7 @@ export class StonewalkerGame {
         const bld = this.buildings.get(buildingId);
         if (bld) {
           bld.repeatQueue = !bld.repeatQueue;
+          this.selectionBar.invalidate();
           this.refreshSelectionUI();
         }
       },
@@ -507,6 +506,7 @@ export class StonewalkerGame {
               u.stance === 'aggressive' ? 'hold_position' : 'aggressive';
           }
         }
+        this.selectionBar.invalidate();
         this.refreshSelectionUI();
       },
       onStopSelected: () => {
@@ -527,11 +527,11 @@ export class StonewalkerGame {
         }
         this.effects.clearPathPreview();
         this.selectionBar.setTravelEstimate(null);
+        this.selectionBar.invalidate();
         this.refreshSelectionUI();
       },
       onCollapse: () => {
-        this.commandResolver.clearSelection();
-        this.effects.clearPathPreview();
+        this.selectionBar.setPopupOpen(false);
         this.refreshSelectionUI();
       },
     });
@@ -547,9 +547,7 @@ export class StonewalkerGame {
         uiLayer.classList.remove('welcome-active');
       },
       onBackToMainMenu: () => {
-        const hasSave =
-          this.saveSystem.loadBattle('manual') !== null ||
-          this.saveSystem.loadBattle('auto') !== null;
+        const hasSave = this.saveSystem.loadMostRecentBattle() !== null;
         this.menus.showMainMenu(hasSave);
       },
     });
@@ -570,29 +568,42 @@ export class StonewalkerGame {
         this.hud.setPauseButtonLabel(false);
         uiLayer.classList.remove('welcome-active');
       },
-      onLoadSavedBattle: (slot) => {
-        const snap = slot
-          ? this.saveSystem.loadBattle(slot)
-          : (this.saveSystem.loadBattle('manual') ??
-            this.saveSystem.loadBattle('auto'));
+      onLoadSavedSlot: (slot) => {
+        const snap = this.saveSystem.loadBattle(slot);
         if (snap) {
+          this.saveSystem.setActiveSlot(slot);
           this.restoreFromSnapshot(snap);
           this.loop.setPaused(false);
           this.hud.setPauseButtonLabel(false);
           uiLayer.classList.remove('welcome-active');
-          this.notifications.pushToast('📂 Saved battle restored!', 'success');
+          this.notifications.pushToast(
+            `📂 Loaded Save Slot ${slot}!`,
+            'success',
+          );
         }
       },
-      onSaveManualSlot: () => {
-        this.performSave('manual');
+      onSaveToSlot: (slot) => {
+        this.saveSystem.setActiveSlot(slot);
+        this.performSave(slot);
         this.notifications.pushToast(
-          '💾 Saved battle to manual slot!',
+          `💾 Saved Battle to Slot ${slot}!`,
           'success',
         );
       },
-      onGetSavedSnapshots: () => ({
-        manual: this.saveSystem.loadBattle('manual'),
-        auto: this.saveSystem.loadBattle('auto'),
+      onEraseSlot: (slot) => {
+        this.sfx.playTap();
+        this.saveSystem.eraseSlot(slot);
+        this.notifications.pushToast(
+          `🗑️ Erased Save Slot ${slot}.`,
+          'info',
+        );
+      },
+      onSelectActiveSlot: (slot) => {
+        this.saveSystem.setActiveSlot(slot);
+      },
+      onGetSaveSlotsState: () => ({
+        activeSlot: this.saveSystem.getActiveSlot(),
+        slots: this.saveSystem.getAllSlots(),
       }),
       onVisibilityChange: (welcomeVisible) => {
         uiLayer.classList.toggle('welcome-active', welcomeVisible);
@@ -664,6 +675,7 @@ export class StonewalkerGame {
             const next = bld.mode === 'stand' ? 'move' : 'stand';
             if (bld.buildingType === 'base') setBaseMode(bld, next);
             else setBuildingMode(bld, next);
+            this.selectionBar.invalidate();
             this.refreshSelectionUI();
           }
         } else if (code === 'KeyH') {
@@ -685,14 +697,17 @@ export class StonewalkerGame {
 
     this.bindBusEvents();
 
-    // Start Level 1 on the 3D canvas and open the ByFalguni Welcome Screen
-    this.startLevel(CAMPAIGN_LEVELS[0]!, 'stonebacks');
+    // Automatically load the player's most recent saved battle on startup if one exists
+    const mostRecentSave = this.saveSystem.loadMostRecentBattle();
+    if (mostRecentSave) {
+      this.restoreFromSnapshot(mostRecentSave);
+    } else {
+      this.startLevel(CAMPAIGN_LEVELS[0]!, 'stonebacks');
+    }
+
     this.loop.setPaused(true);
     this.hud.setPauseButtonLabel(true);
-    const hasInitialSave =
-      this.saveSystem.loadBattle('manual') !== null ||
-      this.saveSystem.loadBattle('auto') !== null;
-    this.menus.showMainMenu(hasInitialSave);
+    this.menus.showMainMenu(mostRecentSave !== null);
 
     if (this.saveSystem.wasCorruptSaveDetected()) {
       this.notifications.pushToast(
@@ -708,7 +723,7 @@ export class StonewalkerGame {
 
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
-        this.performSave('auto');
+        this.performSave(this.saveSystem.getActiveSlot());
       }
     });
 
@@ -1131,6 +1146,7 @@ export class StonewalkerGame {
         'success',
       );
     }
+    this.selectionBar.invalidate();
     this.refreshSelectionUI();
   }
 
@@ -1279,6 +1295,7 @@ export class StonewalkerGame {
       this.buildings.values(),
       this.labLevels,
     );
+    this.selectionBar.invalidate();
   }
 
   public startLevel(level: LevelDefinition, playerTribe: TribeId): void {
@@ -1357,6 +1374,7 @@ export class StonewalkerGame {
       }),
     );
 
+    this.selectionBar.setPopupOpen(false);
     this.recomputeFogAndMeshes();
     this.tutorial.startIfFirstLevel(level.id);
   }
@@ -1391,6 +1409,7 @@ export class StonewalkerGame {
     for (const u of snap.units) {
       this.addUnit(u);
     }
+    this.selectionBar.setPopupOpen(false);
     this.recomputeFogAndMeshes();
   }
 
@@ -1456,8 +1475,6 @@ export class StonewalkerGame {
     });
     this.addBuilding(playerBase);
 
-    // Start with Lv.1 Stone Age essentials (Hut, Barracks, Weapon Station);
-    // Lv.2 and Lv.3 buildings unlock as you upgrade your Council Walker Base!
     this.addBuilding(
       createBuildingEntity({
         buildingType: 'hut',
@@ -1835,6 +1852,7 @@ export class StonewalkerGame {
       );
       this.relocateCampPending = false;
       this.selectionBar.setTravelEstimate('Camp relocating in formation...');
+      this.selectionBar.invalidate();
       this.refreshSelectionUI();
       return;
     }
@@ -1871,6 +1889,7 @@ export class StonewalkerGame {
         }
         this.effects.clearPathPreview();
         this.selectionBar.setTravelEstimate(null);
+        this.selectionBar.invalidate();
         this.refreshSelectionUI();
         return;
       }
@@ -1893,6 +1912,7 @@ export class StonewalkerGame {
 
     if (!isTouch && hits.length === 0) {
       this.commandResolver.clearSelection();
+      this.selectionBar.setPopupOpen(false);
       this.effects.clearPathPreview();
       this.refreshSelectionUI();
     }
@@ -1912,6 +1932,7 @@ export class StonewalkerGame {
       );
       this.relocateCampPending = false;
       this.selectionBar.setTravelEstimate('Camp relocating in formation...');
+      this.selectionBar.invalidate();
       this.refreshSelectionUI();
       return;
     }
@@ -2004,7 +2025,9 @@ export class StonewalkerGame {
     );
   }
 
-  private performSave(slot: 'auto' | 'manual'): void {
+  private performSave(
+    slot: SaveSlotIndex | 'auto' | 'manual' = this.saveSystem.getActiveSlot(),
+  ): void {
     this.saveSystem.saveBattle(
       {
         version: CONFIG.SAVE_VERSION,
@@ -2139,6 +2162,7 @@ export class StonewalkerGame {
           this.world.grid,
           this.bus,
           dt,
+          (newEnemyBld) => this.addBuilding(newEnemyBld),
         );
       }
     }
@@ -2222,10 +2246,11 @@ export class StonewalkerGame {
       );
     }
 
+    // Auto-save every 20 seconds into the active Save Slot (Slot 1 by default)
     this.autosaveTimer += dt;
-    if (this.autosaveTimer >= CONFIG.AUTOSAVE_INTERVAL_SECONDS) {
+    if (this.autosaveTimer >= AUTOSAVE_INTERVAL_SEC) {
       this.autosaveTimer = 0;
-      this.performSave('auto');
+      this.performSave(this.saveSystem.getActiveSlot());
     }
 
     if (treesCrushed > 0 || this.loop.getTickCount() % 12 === 0) {
@@ -2276,6 +2301,7 @@ export class StonewalkerGame {
         this.fog,
         this.world.heightMap,
         this.cameraRig.camera,
+        this.selectionBar.isPopupOpen(),
       );
     }
 

@@ -1,7 +1,10 @@
 /**
- * STONEWALKER — Inspector Card with Building Level-Up Reward Previews
- * Shows the exact unlock reward (new troops, machines, Spirit Powers, Hero boost, +45% HP)
- * on every building's Upgrade button.
+ * STONEWALKER — Event-Safe Realtime Stats & Orders Popup
+ * - Only opens when the player clicks the floating follower icon around a selected entity.
+ * - Uses smart DOM diffing (`lastStructureKey`) so `innerHTML` is ONLY rebuilt when the
+ *   selected entity, level, mode, or stance changes—while live HP and queue progress update
+ *   in-place! This guarantees that every button click (Upgrade, Stop, Walk Mode, Train)
+ *   registers 100% reliably on the first tap/click.
  */
 
 import { BASE_TIER_STATS, BUILDINGS } from '../data/buildings';
@@ -37,8 +40,8 @@ export function getBuildingLevelRewardText(
   switch (buildingType) {
     case 'base':
       return nextLevel === 2
-        ? '+50% HP/ATK, Unlocks Workshop & Bronze Mine'
-        : '+50% HP/ATK, Unlocks Titan Walker & Earthquake';
+        ? '+50% HP/ATK & Unlocks 6 Tier-2 Camp Buildings'
+        : '+50% HP/ATK & Unlocks Machine Workshop + Bronze Mine';
     case 'barracks':
       return nextLevel === 2
         ? '+45% HP & Unlocks Shield Bearer'
@@ -76,6 +79,8 @@ export class SelectionBar {
   public readonly container: HTMLElement;
   private readonly callbacks: SelectionBarCallbacks;
   private travelEstimateText: string | null = null;
+  private popupOpen = false;
+  private lastStructureKey = '';
 
   public constructor(parent: HTMLElement, callbacks: SelectionBarCallbacks) {
     this.callbacks = callbacks;
@@ -84,8 +89,34 @@ export class SelectionBar {
     parent.appendChild(this.container);
   }
 
+  public isPopupOpen(): boolean {
+    return this.popupOpen;
+  }
+
+  public setPopupOpen(open: boolean): void {
+    if (this.popupOpen !== open) {
+      this.popupOpen = open;
+      this.lastStructureKey = '';
+      if (!open) {
+        this.container.style.display = 'none';
+      }
+    }
+  }
+
+  public togglePopup(): boolean {
+    this.setPopupOpen(!this.popupOpen);
+    return this.popupOpen;
+  }
+
+  public invalidate(): void {
+    this.lastStructureKey = '';
+  }
+
   public setTravelEstimate(text: string | null): void {
-    this.travelEstimateText = text;
+    if (this.travelEstimateText !== text) {
+      this.travelEstimateText = text;
+      this.lastStructureKey = '';
+    }
   }
 
   private getPortraitSvg(roleOrType: string): string {
@@ -113,8 +144,9 @@ export class SelectionBar {
     buildings: ReadonlyMap<EntityId, BuildingEntity>,
     playerState?: FactionState,
   ): void {
-    if (selectedIds.length === 0) {
+    if (selectedIds.length === 0 || !this.popupOpen) {
       this.container.style.display = 'none';
+      this.lastStructureKey = '';
       return;
     }
     this.container.style.display = 'flex';
@@ -142,8 +174,44 @@ export class SelectionBar {
     const def = BUILDINGS[bld.buildingType];
     const hpPct = Math.round((bld.hp / Math.max(1, bld.maxHp)) * 100);
     const isMoving = bld.mode === 'move';
-    const modeLabel = isMoving ? '⚓ Plant Legs [M]' : '🚶 Walk Mode [M]';
+    const queueSig = bld.queue.map((q) => q.itemType).join(',');
+    const techSig = playerState?.researchedTechs.join(',') ?? '';
 
+    const structKey = `bld:${bld.id}:lv${bld.level}:m${bld.mode}:c${bld.isConstructed}:r${bld.repeatQueue}:q[${queueSig}]:t[${techSig}]:est[${this.travelEstimateText ?? ''}]`;
+
+    if (this.lastStructureKey === structKey) {
+      // Update live HP bar, HP text, and queue progress bar in-place without touching buttons!
+      const hpBar = this.container.querySelector(
+        '#sel-live-hp-bar',
+      ) as HTMLElement | null;
+      if (hpBar) hpBar.style.width = `${hpPct}%`;
+
+      const hpText = this.container.querySelector(
+        '#sel-live-hp-text',
+      ) as HTMLElement | null;
+      if (hpText) hpText.textContent = `${Math.ceil(bld.hp)}/${bld.maxHp}`;
+
+      if (bld.queue.length > 0) {
+        const head = bld.queue[0]!;
+        const qPct = Math.min(
+          100,
+          Math.round((head.progress / Math.max(1, head.totalTime)) * 100),
+        );
+        const qBar = this.container.querySelector(
+          '#sel-live-q-bar',
+        ) as HTMLElement | null;
+        if (qBar) qBar.style.width = `${qPct}%`;
+        const qText = this.container.querySelector(
+          '#sel-live-q-pct',
+        ) as HTMLElement | null;
+        if (qText) qText.textContent = `${qPct}%`;
+      }
+      return;
+    }
+
+    this.lastStructureKey = structKey;
+
+    const modeLabel = isMoving ? '⚓ Plant Legs [M]' : '🚶 Walk Mode [M]';
     const baseTier =
       bld.buildingType === 'base'
         ? (BASE_TIER_STATS[bld.level - 1] ?? BASE_TIER_STATS[0]!)
@@ -171,10 +239,10 @@ export class SelectionBar {
         <div class="parchment-card" style="padding:5px 8px;">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">
             <div style="display:flex;gap:4px;flex-wrap:wrap;">${qPills}</div>
-            <strong style="font-size:0.74rem;">${qPct}%</strong>
+            <strong id="sel-live-q-pct" style="font-size:0.74rem;">${qPct}%</strong>
           </div>
           <div style="width:100%;height:5px;background:rgba(0,0,0,0.18);border-radius:3px;margin-top:4px;overflow:hidden;">
-            <div style="width:${qPct}%;height:100%;background:var(--accent-primary);"></div>
+            <div id="sel-live-q-bar" style="width:${qPct}%;height:100%;background:var(--accent-primary);"></div>
           </div>
         </div>
       `;
@@ -220,9 +288,18 @@ export class SelectionBar {
       rewardText = getBuildingLevelRewardText(bld.buildingType, nextLv);
       if (bld.buildingType === 'base') {
         const nextTier = BASE_TIER_STATS[bld.level];
-        upgradeLabel = nextTier
-          ? `⬆ Upgrade Lv.${nextLv} (W:${nextTier.upgradeCost.wood} S:${nextTier.upgradeCost.stone})`
-          : '';
+        if (nextTier) {
+          const parts: string[] = [];
+          if (nextTier.upgradeCost.wood > 0)
+            parts.push(`W:${nextTier.upgradeCost.wood}`);
+          if (nextTier.upgradeCost.stone > 0)
+            parts.push(`S:${nextTier.upgradeCost.stone}`);
+          if (nextTier.upgradeCost.hide > 0)
+            parts.push(`H:${nextTier.upgradeCost.hide}`);
+          if (nextTier.upgradeCost.bronze > 0)
+            parts.push(`B:${nextTier.upgradeCost.bronze}`);
+          upgradeLabel = `⬆ Upgrade Lv.${nextLv} (${parts.join(' ')})`;
+        }
       } else {
         const mult = bld.level;
         const wCost = Math.round((def.cost.wood ?? 60) * 0.8 * mult);
@@ -241,13 +318,13 @@ export class SelectionBar {
           </div>
           <div style="font-size:0.72rem;color:var(--text-muted);line-height:1.25;">${def.tooltip}</div>
           <div style="width:100%;height:6px;background:rgba(0,0,0,0.45);border-radius:3px;margin-top:4px;overflow:hidden;">
-            <div style="width:${hpPct}%;height:100%;background:var(--accent-success);"></div>
+            <div id="sel-live-hp-bar" style="width:${hpPct}%;height:100%;background:var(--accent-success);"></div>
           </div>
         </div>
       </div>
 
       <div class="stat-pill-grid">
-        <div class="stat-pill"><span>❤️ HP</span><strong>${Math.ceil(bld.hp)}/${bld.maxHp}</strong></div>
+        <div class="stat-pill"><span>❤️ HP</span><strong id="sel-live-hp-text">${Math.ceil(bld.hp)}/${bld.maxHp}</strong></div>
         <div class="stat-pill"><span>🛡 ARMOR</span><strong>${def.armor + (bld.level - 1) * 3}</strong></div>
         <div class="stat-pill"><span>${baseTier ? '⚔ ATK' : '📐 SIZE'}</span><strong>${baseTier ? baseTier.attackDamage : `${bld.footprint}×${bld.footprint}`}</strong></div>
         <div class="stat-pill"><span>⚙ MODE</span><strong style="color:${isMoving ? 'var(--accent-primary)' : 'var(--accent-success)'};">${isMoving ? 'WALKING' : 'PLANTED'}</strong></div>
@@ -289,7 +366,10 @@ export class SelectionBar {
 
     this.container
       .querySelector('#sel-close')
-      ?.addEventListener('click', () => this.callbacks.onCollapse());
+      ?.addEventListener('click', () => {
+        this.setPopupOpen(false);
+        this.callbacks.onCollapse();
+      });
     this.container
       .querySelector('#sel-toggle-mode')
       ?.addEventListener('click', () =>
@@ -322,6 +402,46 @@ export class SelectionBar {
     playerState?: FactionState,
   ): void {
     const hpPct = Math.round((unit.hp / Math.max(1, unit.maxHp)) * 100);
+    const wTier =
+      unit.kind === 'unit'
+        ? (playerState?.unitWeaponTiers[unit.role as UnitRole] ?? 0)
+        : 0;
+    const aTier =
+      unit.kind === 'unit'
+        ? (playerState?.unitArmorTiers[unit.role as UnitRole] ?? 0)
+        : 0;
+
+    const structKey = `unit:${unit.id}:st${unit.stance}:v${unit.veterancyRank}:w${wTier}:a${aTier}:c${unit.activeCrawlerIds.length}`;
+
+    if (this.lastStructureKey === structKey) {
+      const hpBar = this.container.querySelector(
+        '#sel-unit-hp-bar',
+      ) as HTMLElement | null;
+      if (hpBar) hpBar.style.width = `${hpPct}%`;
+
+      const hpText = this.container.querySelector(
+        '#sel-unit-hp-text',
+      ) as HTMLElement | null;
+      if (hpText) hpText.textContent = `${Math.ceil(unit.hp)}/${unit.maxHp}`;
+
+      const statusEl = this.container.querySelector(
+        '#sel-unit-status-text',
+      ) as HTMLElement | null;
+      if (statusEl) {
+        statusEl.textContent = `Activity: ${unit.status.toUpperCase()}`;
+      }
+
+      const loadEl = this.container.querySelector(
+        '#sel-unit-load-text',
+      ) as HTMLElement | null;
+      if (loadEl) {
+        loadEl.textContent = `${Math.floor(unit.carryAmount)} ${unit.carryResourceType ?? ''}`;
+      }
+      return;
+    }
+
+    this.lastStructureKey = structKey;
+
     const isMachine = unit.kind === 'machine';
     const machineDef = isMachine
       ? MACHINES[unit.role as keyof typeof MACHINES]
@@ -345,15 +465,6 @@ export class SelectionBar {
         ? `Strong vs: ${unitDef.strongVs} · Weak vs: ${unitDef.weakVs}`
         : `${heroDef?.title ?? 'Chieftain Hero'} — Revives at Spirit Totem`;
 
-    const wTier =
-      unit.kind === 'unit'
-        ? (playerState?.unitWeaponTiers[unit.role as UnitRole] ?? 0)
-        : 0;
-    const aTier =
-      unit.kind === 'unit'
-        ? (playerState?.unitArmorTiers[unit.role as UnitRole] ?? 0)
-        : 0;
-
     const atkVal = unitDef
       ? Math.round(unitDef.baseDamage * WEAPON_TIERS[wTier].damageMultiplier)
       : (machineDef?.baseDamage ?? heroDef?.damage ?? 20);
@@ -370,7 +481,7 @@ export class SelectionBar {
       machineDef && machineDef.spawnsCrawler
         ? `<div class="stat-pill"><span>🕷 CRAWLERS</span><strong>${unit.activeCrawlerIds.length}/8</strong></div>`
         : unit.role === 'worker'
-          ? `<div class="stat-pill"><span>🎒 LOAD</span><strong>${Math.floor(unit.carryAmount)} ${unit.carryResourceType ?? ''}</strong></div>`
+          ? `<div class="stat-pill"><span>🎒 LOAD</span><strong id="sel-unit-load-text">${Math.floor(unit.carryAmount)} ${unit.carryResourceType ?? ''}</strong></div>`
           : `<div class="stat-pill"><span>🎯 RANGE</span><strong>${rngVal.toFixed(1)}</strong></div>`;
 
     this.container.innerHTML = `
@@ -385,13 +496,13 @@ export class SelectionBar {
           </div>
           <div style="font-size:0.72rem;color:var(--text-muted);line-height:1.25;">${counters}</div>
           <div style="width:100%;height:6px;background:rgba(0,0,0,0.45);border-radius:3px;margin-top:4px;overflow:hidden;">
-            <div style="width:${hpPct}%;height:100%;background:var(--accent-success);"></div>
+            <div id="sel-unit-hp-bar" style="width:${hpPct}%;height:100%;background:var(--accent-success);"></div>
           </div>
         </div>
       </div>
 
       <div class="stat-pill-grid">
-        <div class="stat-pill"><span>❤️ HP</span><strong>${Math.ceil(unit.hp)}/${unit.maxHp}</strong></div>
+        <div class="stat-pill"><span>❤️ HP</span><strong id="sel-unit-hp-text">${Math.ceil(unit.hp)}/${unit.maxHp}</strong></div>
         <div class="stat-pill"><span>⚔ ATK (T${wTier})</span><strong>${atkVal}</strong></div>
         <div class="stat-pill"><span>🛡 ARM (T${aTier})</span><strong>${armVal}</strong></div>
         ${fourthPill}
@@ -404,7 +515,7 @@ export class SelectionBar {
           </button>
           <button id="sel-stop" class="sw-btn sw-btn-danger" style="min-height:36px;font-size:0.75rem;">⏹ Stop</button>
         </div>
-        <span style="font-size:0.72rem;font-weight:800;color:var(--text-muted);">
+        <span id="sel-unit-status-text" style="font-size:0.72rem;font-weight:800;color:var(--text-muted);">
           Activity: ${unit.status.toUpperCase()}
         </span>
       </div>
@@ -412,7 +523,10 @@ export class SelectionBar {
 
     this.container
       .querySelector('#sel-close')
-      ?.addEventListener('click', () => this.callbacks.onCollapse());
+      ?.addEventListener('click', () => {
+        this.setPopupOpen(false);
+        this.callbacks.onCollapse();
+      });
     this.container
       .querySelector('#sel-stance')
       ?.addEventListener('click', () => this.callbacks.onToggleUnitStance());
@@ -426,6 +540,12 @@ export class SelectionBar {
     units: ReadonlyMap<EntityId, UnitEntity>,
     buildings: ReadonlyMap<EntityId, BuildingEntity>,
   ): void {
+    const structKey = `multi:${selectedIds.join(',')}`;
+    if (this.lastStructureKey === structKey) {
+      return;
+    }
+    this.lastStructureKey = structKey;
+
     const counts = new Map<string, number>();
     let buildingCount = 0;
     let unitCount = 0;
@@ -473,7 +593,10 @@ export class SelectionBar {
 
     this.container
       .querySelector('#sel-close')
-      ?.addEventListener('click', () => this.callbacks.onCollapse());
+      ?.addEventListener('click', () => {
+        this.setPopupOpen(false);
+        this.callbacks.onCollapse();
+      });
     this.container
       .querySelector('#sel-relocate')
       ?.addEventListener('click', () =>

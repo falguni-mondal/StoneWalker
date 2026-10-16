@@ -1,7 +1,9 @@
 /**
- * STONEWALKER — Visual Effects, World-Space Health Bars, Projectiles & Command Rings
- * Adds Clash of Clans / Command & Conquer style floating health bars and role/rank badges
- * above damaged or selected units and buildings.
+ * STONEWALKER — High-Visibility Green Building Grid Ghost & Floating Selection Follower Button
+ * - Upgrades building placement ghost to a vivid emerald green (`0x22c55e`) with individual
+ *   grid cell lines so players clearly see every tile covered by the footprint.
+ * - Renders a floating world-space "📊 Stats & Orders" icon button that follows selected
+ *   troop(s), machine(s), or building(s); clicking it opens the realtime stats popup.
  */
 
 import * as THREE from 'three';
@@ -42,19 +44,27 @@ export class EffectsManager {
   private readonly projectileGroup = new THREE.Group();
   private readonly powerZoneGroup = new THREE.Group();
   private readonly landmarkGroup = new THREE.Group();
+
+  // High-visibility green placement ghost + grid lines
+  private readonly ghostGroup = new THREE.Group();
   private readonly ghostMesh: THREE.Mesh;
+  private readonly ghostWireframe: THREE.LineSegments;
+  private ghostGridHelper: THREE.GridHelper;
+  private currentGhostFootprint = 2;
+
   private readonly dustPool: DustParticle[] = [];
   private readonly floatingTexts: FloatingTextItem[] = [];
   private readonly hpBarElements = new Map<EntityId, HTMLElement>();
+  private selectionActionBtn: HTMLButtonElement | null = null;
 
-  private readonly ringGeo = new THREE.RingGeometry(0.62, 0.86, 28);
+  private readonly ringGeo = new THREE.RingGeometry(0.62, 0.88, 28);
   private readonly ringMat = new THREE.MeshBasicMaterial({
     color: 0xffd166,
     side: THREE.DoubleSide,
   });
   private readonly pathDotGeo = new THREE.SphereGeometry(0.2, 8, 8);
   private readonly pathDotValidMat = new THREE.MeshBasicMaterial({
-    color: 0x7cd43b,
+    color: 0x4ade80,
   });
   private readonly pathDotBlockedMat = new THREE.MeshBasicMaterial({
     color: 0xff4d40,
@@ -77,15 +87,36 @@ export class EffectsManager {
     this.settings = settings;
     this.ringGeo.rotateX(-Math.PI / 2);
 
+    // Vivid emerald green placement block + crisp grid border
+    const boxGeo = new THREE.BoxGeometry(1, 0.45, 1);
     this.ghostMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(1, 0.55, 1),
+      boxGeo,
       new THREE.MeshBasicMaterial({
-        color: 0x6f9c4a,
+        color: 0x22c55e,
         transparent: true,
-        opacity: 0.48,
+        opacity: 0.78,
+        depthWrite: false,
       }),
     );
-    this.ghostMesh.visible = false;
+
+    const edgesGeo = new THREE.EdgesGeometry(boxGeo);
+    this.ghostWireframe = new THREE.LineSegments(
+      edgesGeo,
+      new THREE.LineBasicMaterial({
+        color: 0xbbffaa,
+        linewidth: 2,
+      }),
+    );
+
+    this.ghostGridHelper = new THREE.GridHelper(2, 2, 0xd9ffcb, 0x4ade80);
+    this.ghostGridHelper.position.y = 0.24;
+
+    this.ghostGroup.add(
+      this.ghostMesh,
+      this.ghostWireframe,
+      this.ghostGridHelper,
+    );
+    this.ghostGroup.visible = false;
 
     this.root.add(
       this.selectionGroup,
@@ -93,8 +124,37 @@ export class EffectsManager {
       this.projectileGroup,
       this.powerZoneGroup,
       this.landmarkGroup,
-      this.ghostMesh,
+      this.ghostGroup,
     );
+  }
+
+  /**
+   * Initializes the floating follower icon button that tracks selected units/buildings
+   * and opens the realtime stats popup when clicked.
+   */
+  public initSelectionFollowerButton(
+    uiLayer: HTMLElement,
+    onToggleStatsPopup: () => void,
+  ): void {
+    if (this.selectionActionBtn) {
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.className = 'sw-btn sw-btn-primary world-selection-follower-btn';
+    btn.title = 'Open Realtime Stats & Orders';
+    btn.innerHTML = `<span>📊</span><span id="follower-btn-label">Stats</span>`;
+    btn.style.display = 'none';
+
+    btn.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+    });
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onToggleStatsPopup();
+    });
+
+    uiLayer.appendChild(btn);
+    this.selectionActionBtn = btn;
   }
 
   public syncSelectionRings(
@@ -115,7 +175,8 @@ export class EffectsManager {
   }
 
   /**
-   * Renders Clash of Clans / C&C style world-space health bars above damaged or selected entities.
+   * Updates World-Space Health Bars AND positions the floating follower button
+   * right next to the selected troop(s), machine(s), or building(s).
    */
   public syncWorldHealthBars(
     units: ReadonlyMap<EntityId, UnitEntity>,
@@ -124,6 +185,7 @@ export class EffectsManager {
     fog: FogOfWar,
     heightMap: HeightMap,
     camera: THREE.Camera,
+    isPopupOpen: boolean = false,
   ): void {
     const overlay = document.getElementById('damage-overlay');
     if (!overlay) return;
@@ -178,7 +240,10 @@ export class EffectsManager {
         track.style.width = `${widthPx}px`;
       }
       if (fill) {
-        const pct = Math.max(0, Math.min(100, Math.round((hp / Math.max(1, maxHp)) * 100)));
+        const pct = Math.max(
+          0,
+          Math.min(100, Math.round((hp / Math.max(1, maxHp)) * 100)),
+        );
         fill.style.width = `${pct}%`;
         fill.style.background = isPlayer
           ? pct > 45
@@ -191,11 +256,30 @@ export class EffectsManager {
       }
     };
 
+    let sumX = 0;
+    let sumZ = 0;
+    let maxYOffset = 2.0;
+    let validSelectedCount = 0;
+
     for (const u of units.values()) {
       if (u.hp <= 0 || u.isReviving) continue;
       const isSelected = selectedSet.has(u.id);
+      if (isSelected) {
+        sumX += u.position.x;
+        sumZ += u.position.z;
+        maxYOffset = Math.max(
+          maxYOffset,
+          u.kind === 'machine' ? 2.5 : u.kind === 'hero' ? 2.4 : 1.9,
+        );
+        validSelectedCount++;
+      }
       const isDamaged = u.hp < u.maxHp;
-      if (!isSelected && !isDamaged && u.veterancyRank === 0 && u.kind !== 'hero') {
+      if (
+        !isSelected &&
+        !isDamaged &&
+        u.veterancyRank === 0 &&
+        u.kind !== 'hero'
+      ) {
         continue;
       }
       if (u.faction !== 'player' && !fog.isPositionVisible(u.position)) {
@@ -208,7 +292,8 @@ export class EffectsManager {
           : u.role === 'worker' && u.carryAmount > 0
             ? `🎒 ${Math.floor(u.carryAmount)}`
             : stars;
-      const yOff = u.kind === 'machine' ? 2.2 : u.kind === 'hero' ? 2.1 : 1.55;
+      const yOff =
+        u.kind === 'machine' ? 2.2 : u.kind === 'hero' ? 2.1 : 1.55;
       updateBar(
         u.id,
         u.position,
@@ -224,6 +309,15 @@ export class EffectsManager {
     for (const b of buildings.values()) {
       if (b.hp <= 0) continue;
       const isSelected = selectedSet.has(b.id);
+      if (isSelected) {
+        sumX += b.position.x;
+        sumZ += b.position.z;
+        maxYOffset = Math.max(
+          maxYOffset,
+          b.buildingType === 'base' ? 4.8 : 3.1,
+        );
+        validSelectedCount++;
+      }
       const isDamaged = b.hp < b.maxHp || !b.isConstructed;
       if (!isSelected && !isDamaged) continue;
       if (b.faction !== 'player' && !fog.isPositionExplored(b.position)) {
@@ -253,6 +347,48 @@ export class EffectsManager {
         this.hpBarElements.delete(id);
       }
     }
+
+    // Position the Floating Follower Icon Button around the selected entity/group
+    if (this.selectionActionBtn) {
+      if (validSelectedCount === 0) {
+        this.selectionActionBtn.style.display = 'none';
+      } else {
+        const avgX = sumX / validSelectedCount;
+        const avgZ = sumZ / validSelectedCount;
+        const h = heightMap.getInterpolatedHeight(avgX, avgZ);
+        projVec.set(avgX, h + maxYOffset + 0.45, avgZ);
+        projVec.project(camera);
+
+        if (projVec.z > 1) {
+          this.selectionActionBtn.style.display = 'none';
+        } else {
+          const rawX = (projVec.x * 0.5 + 0.5) * window.innerWidth + 34;
+          const rawY = (-projVec.y * 0.5 + 0.5) * window.innerHeight - 12;
+          const clampedX = Math.max(
+            48,
+            Math.min(window.innerWidth - 64, rawX),
+          );
+          const clampedY = Math.max(
+            58,
+            Math.min(window.innerHeight - 90, rawY),
+          );
+
+          this.selectionActionBtn.style.display = 'inline-flex';
+          this.selectionActionBtn.style.left = `${clampedX}px`;
+          this.selectionActionBtn.style.top = `${clampedY}px`;
+          const lbl = this.selectionActionBtn.querySelector(
+            '#follower-btn-label',
+          );
+          if (lbl) {
+            lbl.textContent = isPopupOpen
+              ? 'Hide'
+              : validSelectedCount > 1
+                ? `Stats (${validSelectedCount})`
+                : 'Stats';
+          }
+        }
+      }
+    }
   }
 
   public showPathPreview(
@@ -279,6 +415,9 @@ export class EffectsManager {
     this.pathPreviewGroup.clear();
   }
 
+  /**
+   * Renders a high-visibility green grid placeholder showing the exact tiles covered.
+   */
   public updatePlacementGhost(
     visible: boolean,
     position: Vec2,
@@ -286,15 +425,41 @@ export class EffectsManager {
     isValid: boolean,
     heightMap: HeightMap,
   ): void {
-    this.ghostMesh.visible = visible;
+    this.ghostGroup.visible = visible;
     if (!visible) {
       return;
     }
+
+    if (footprint !== this.currentGhostFootprint) {
+      this.currentGhostFootprint = footprint;
+      this.ghostGroup.remove(this.ghostGridHelper);
+      this.ghostGridHelper.geometry.dispose();
+      this.ghostGridHelper = new THREE.GridHelper(
+        footprint,
+        footprint,
+        0xffffff,
+        0x86efac,
+      );
+      this.ghostGridHelper.position.y = 0.25;
+      this.ghostGroup.add(this.ghostGridHelper);
+    }
+
     const h = heightMap.getInterpolatedHeight(position.x, position.z);
-    this.ghostMesh.position.set(position.x, h + 0.35, position.z);
-    this.ghostMesh.scale.set(footprint, 1.4, footprint);
+    this.ghostGroup.position.set(position.x, h + 0.26, position.z);
+    this.ghostMesh.scale.set(footprint, 1.0, footprint);
+    this.ghostWireframe.scale.set(footprint, 1.05, footprint);
+
     const mat = this.ghostMesh.material as THREE.MeshBasicMaterial;
-    mat.color.setHex(isValid ? 0x6f9c4a : 0xc4453a);
+    const wireMat = this.ghostWireframe.material as THREE.LineBasicMaterial;
+    if (isValid) {
+      mat.color.setHex(0x22c55e); // Vivid bright emerald green
+      mat.opacity = 0.82;
+      wireMat.color.setHex(0xd9ffcb);
+    } else {
+      mat.color.setHex(0xef4444);
+      mat.opacity = 0.82;
+      wireMat.color.setHex(0xfecaca);
+    }
   }
 
   public syncProjectiles(

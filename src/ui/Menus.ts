@@ -1,10 +1,11 @@
 /**
- * STONEWALKER — Welcome Screen, Non-Overflowing Skirmish Builder, Saved Games, Settings & Credits
- * - Hides the underlying Welcome Card whenever a modal opens so cards never stack on each other.
- * - Uses tactile segmented pill buttons in Custom Skirmish instead of overflowing native <select> boxes.
+ * STONEWALKER — Welcome Screen, 3-Slot Saved Games Manager (with Erase), Skirmish, Settings & Credits
+ * - Manages max 3 Save Slots (Slot 1, Slot 2, Slot 3).
+ * - Defaults to overwriting Slot 1 unless the player selects Slot 2 or Slot 3.
+ * - Includes an Erase button (🗑️ Erase) on each slot to clear saved progress.
  */
 
-import type { SavedBattleSnapshot } from '../core/SaveSystem';
+import type { SavedBattleSnapshot, SaveSlotIndex } from '../core/SaveSystem';
 import type { SettingsManager } from '../core/Settings';
 import { TRIBE_LIST } from '../data/heroes';
 import {
@@ -22,11 +23,13 @@ export interface MenusCallbacks {
   onOpenCampaign: () => void;
   onStartSkirmish: (level: LevelDefinition, tribe: TribeId) => void;
   onResumeCurrentBattle: () => void;
-  onLoadSavedBattle: (slot?: 'manual' | 'auto') => void;
-  onSaveManualSlot: () => void;
-  onGetSavedSnapshots?: () => {
-    manual: SavedBattleSnapshot | null;
-    auto: SavedBattleSnapshot | null;
+  onLoadSavedSlot: (slot: SaveSlotIndex) => void;
+  onSaveToSlot: (slot: SaveSlotIndex) => void;
+  onEraseSlot: (slot: SaveSlotIndex) => void;
+  onSelectActiveSlot: (slot: SaveSlotIndex) => void;
+  onGetSaveSlotsState: () => {
+    activeSlot: SaveSlotIndex;
+    slots: Record<SaveSlotIndex, SavedBattleSnapshot | null>;
   };
   onVisibilityChange?: (welcomeVisible: boolean) => void;
 }
@@ -37,7 +40,6 @@ export class MenusManager {
   private readonly settings: SettingsManager;
   private readonly callbacks: MenusCallbacks;
 
-  // Skirmish Builder State (Tactile Segmented Pills — 0% Dropdown Overflow)
   private skirmishSize: number = 128;
   private skirmishEnemies: 1 | 2 | 3 = 2;
   private skirmishDifficulty: 'easy' | 'normal' | 'hard' = 'normal';
@@ -63,7 +65,7 @@ export class MenusManager {
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      width: min(520px, 94vw);
+      width: min(530px, 94vw);
       max-height: 88dvh;
       padding: 18px;
       display: none;
@@ -87,7 +89,6 @@ export class MenusManager {
   }
 
   private openSubModal(): void {
-    // Hide the Welcome Card behind the modal so they never visually collide
     const welcomeCard = this.mainMenuEl.querySelector(
       '.welcome-card',
     ) as HTMLElement | null;
@@ -107,10 +108,12 @@ export class MenusManager {
     }
   }
 
-  public showMainMenu(_hasSavedSnapshot: boolean): void {
+  public showMainMenu(hasSavedSnapshot: boolean): void {
     this.modalEl.style.display = 'none';
     this.mainMenuEl.style.display = 'flex';
     this.callbacks.onVisibilityChange?.(true);
+
+    const { activeSlot } = this.callbacks.onGetSaveSlotsState();
 
     this.mainMenuEl.innerHTML = `
       <div class="stone-panel welcome-card">
@@ -122,7 +125,7 @@ export class MenusManager {
 
         <div class="welcome-menu-buttons">
           <button id="mm-play" class="sw-btn sw-btn-primary welcome-btn-main">
-            ▶ Play Game
+            ▶ ${hasSavedSnapshot ? `Continue Battle (Slot ${activeSlot})` : 'Play Game'}
           </button>
           <button id="mm-campaign" class="sw-btn welcome-btn">
             🗺️ Campaign Map (8 Levels)
@@ -131,7 +134,7 @@ export class MenusManager {
             ⚔️ Skirmish Battle
           </button>
           <button id="mm-saved-games" class="sw-btn welcome-btn">
-            💾 Saved Games
+            💾 Saved Games (3 Slots · Active: Slot ${activeSlot})
           </button>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;width:100%;">
             <button id="mm-settings" class="sw-btn welcome-btn">
@@ -200,6 +203,142 @@ export class MenusManager {
     this.mainMenuEl.style.display = 'none';
     this.modalEl.style.display = 'none';
     this.callbacks.onVisibilityChange?.(false);
+  }
+
+  /**
+   * 3-Slot Saved Games Manager with Active Auto-Save Slot Selection, Load, Save & Erase.
+   */
+  public showSavedGamesModal(): void {
+    this.openSubModal();
+    const { activeSlot, slots } = this.callbacks.onGetSaveSlotsState();
+
+    const formatSlotCard = (slotNum: SaveSlotIndex): string => {
+      const snap = slots[slotNum];
+      const isSelected = activeSlot === slotNum;
+      const badge = isSelected
+        ? `<span style="padding:2px 8px;border-radius:999px;background:var(--accent-primary);color:#1f1105;font-size:0.68rem;font-weight:900;">✓ Active Auto-Save Slot</span>`
+        : `<button data-set-active-slot="${slotNum}" class="sw-btn" style="min-height:28px;padding:2px 8px;font-size:0.7rem;">Set as Active Slot</button>`;
+
+      if (!snap) {
+        return `
+          <div class="parchment-card" style="padding:12px;display:flex;flex-direction:column;gap:8px;border:${isSelected ? '2px solid var(--accent-primary)' : '2px solid var(--border-parchment)'};">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">
+              <strong style="font-size:0.95rem;">Save Slot ${slotNum} (Empty)</strong>
+              ${badge}
+            </div>
+            <div style="font-size:0.76rem;color:#5c4938;">
+              No saved battle in Slot ${slotNum} yet. Click Save Here to store your current battle.
+            </div>
+            <div style="display:flex;gap:6px;">
+              <button data-save-slot="${slotNum}" class="sw-btn sw-btn-primary" style="min-height:36px;">
+                💾 Save Here (Slot ${slotNum})
+              </button>
+            </div>
+          </div>
+        `;
+      }
+
+      const dateStr = new Date(snap.timestamp).toLocaleString();
+      const lvlLabel =
+        snap.levelId > 0 ? `Campaign Level ${snap.levelId}` : 'Custom Skirmish';
+      const playerRes = snap.factions.find((f) => f.faction === 'player')
+        ?.resources;
+      const resSummary = playerRes
+        ? `F:${Math.floor(playerRes.food)} · W:${Math.floor(playerRes.wood)} · S:${Math.floor(playerRes.stone)}`
+        : '';
+
+      return `
+        <div class="parchment-card" style="padding:12px;display:flex;flex-direction:column;gap:8px;border:${isSelected ? '2px solid var(--accent-primary)' : '2px solid var(--border-parchment)'};">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">
+            <strong style="font-size:0.95rem;">Save Slot ${slotNum} — ${lvlLabel}</strong>
+            ${badge}
+          </div>
+          <div style="font-size:0.75rem;color:#4a3928;">
+            Saved: ${dateStr} · ${resSummary}
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button data-load-slot="${slotNum}" class="sw-btn sw-btn-success" style="min-height:36px;flex:1;">
+              📂 Load Slot ${slotNum}
+            </button>
+            <button data-save-slot="${slotNum}" class="sw-btn sw-btn-primary" style="min-height:36px;">
+              💾 Overwrite
+            </button>
+            <button data-erase-slot="${slotNum}" class="sw-btn sw-btn-danger" style="min-height:36px;">
+              🗑️ Erase
+            </button>
+          </div>
+        </div>
+      `;
+    };
+
+    this.modalEl.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <strong style="font-size:1.15rem;color:var(--accent-gold);">💾 Saved Games (Max 3 Slots)</strong>
+          <div style="font-size:0.74rem;color:var(--text-muted);">Auto-saves overwrite Slot ${activeSlot} every 20s unless you select another slot.</div>
+        </div>
+        <button id="sg-close" class="sw-btn" style="min-height:34px;">✕</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        ${formatSlotCard(1)}
+        ${formatSlotCard(2)}
+        ${formatSlotCard(3)}
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:4px;">
+        <button id="sg-back" class="sw-btn">Close</button>
+      </div>
+    `;
+
+    this.modalEl.querySelector('#sg-close')?.addEventListener('click', () => {
+      this.closeSubModal();
+    });
+    this.modalEl.querySelector('#sg-back')?.addEventListener('click', () => {
+      this.closeSubModal();
+    });
+
+    this.modalEl
+      .querySelectorAll('[data-set-active-slot]')
+      .forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const slot = Number(
+            (btn as HTMLElement).getAttribute('data-set-active-slot'),
+          ) as SaveSlotIndex;
+          this.callbacks.onSelectActiveSlot(slot);
+          this.showSavedGamesModal();
+        });
+      });
+
+    this.modalEl.querySelectorAll('[data-save-slot]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const slot = Number(
+          (btn as HTMLElement).getAttribute('data-save-slot'),
+        ) as SaveSlotIndex;
+        this.callbacks.onSelectActiveSlot(slot);
+        this.callbacks.onSaveToSlot(slot);
+        this.showSavedGamesModal();
+      });
+    });
+
+    this.modalEl.querySelectorAll('[data-load-slot]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const slot = Number(
+          (btn as HTMLElement).getAttribute('data-load-slot'),
+        ) as SaveSlotIndex;
+        this.callbacks.onSelectActiveSlot(slot);
+        this.hideAll();
+        this.callbacks.onLoadSavedSlot(slot);
+      });
+    });
+
+    this.modalEl.querySelectorAll('[data-erase-slot]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const slot = Number(
+          (btn as HTMLElement).getAttribute('data-erase-slot'),
+        ) as SaveSlotIndex;
+        this.callbacks.onEraseSlot(slot);
+        this.showSavedGamesModal();
+      });
+    });
   }
 
   public showSkirmishModal(): void {
@@ -378,84 +517,6 @@ export class MenusManager {
     });
   }
 
-  public showSavedGamesModal(): void {
-    this.openSubModal();
-    const slots = this.callbacks.onGetSavedSnapshots?.() ?? {
-      manual: null,
-      auto: null,
-    };
-
-    const formatSlot = (
-      title: string,
-      snap: SavedBattleSnapshot | null,
-      slotKey: 'manual' | 'auto',
-    ): string => {
-      if (!snap) {
-        return `
-          <div class="parchment-card" style="padding:12px;display:flex;justify-content:space-between;align-items:center;opacity:0.7;">
-            <div>
-              <strong>${title}</strong>
-              <div style="font-size:0.76rem;">Empty Slot — Use 💾 Save in-game to record progress.</div>
-            </div>
-            <span style="font-size:0.76rem;font-weight:800;">Empty</span>
-          </div>
-        `;
-      }
-      const dateStr = new Date(snap.timestamp).toLocaleString();
-      const lvlLabel =
-        snap.levelId > 0 ? `Campaign Level ${snap.levelId}` : 'Custom Skirmish';
-      return `
-        <div class="parchment-card" style="padding:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-          <div>
-            <strong style="font-size:0.92rem;">${title} — ${lvlLabel}</strong>
-            <div style="font-size:0.74rem;">Saved: ${dateStr} · Seed: ${snap.seed}</div>
-          </div>
-          <button data-load-slot="${slotKey}" class="sw-btn sw-btn-success" style="min-height:38px;">
-            📂 Load Game
-          </button>
-        </div>
-      `;
-    };
-
-    this.modalEl.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <strong style="font-size:1.15rem;color:var(--accent-gold);">💾 Saved Games & Progress</strong>
-        <button id="sg-close" class="sw-btn" style="min-height:34px;">✕</button>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:10px;">
-        ${formatSlot('Manual Save Slot', slots.manual, 'manual')}
-        ${formatSlot('Automatic Save Slot (60s)', slots.auto, 'auto')}
-      </div>
-      <div style="display:flex;justify-content:space-between;gap:8px;margin-top:4px;flex-wrap:wrap;">
-        <button id="sg-save-now" class="sw-btn sw-btn-primary">💾 Save Current Battle Now</button>
-        <button id="sg-back" class="sw-btn">Back</button>
-      </div>
-    `;
-
-    this.modalEl.querySelector('#sg-close')?.addEventListener('click', () => {
-      this.closeSubModal();
-    });
-    this.modalEl.querySelector('#sg-back')?.addEventListener('click', () => {
-      this.closeSubModal();
-    });
-    this.modalEl
-      .querySelector('#sg-save-now')
-      ?.addEventListener('click', () => {
-        this.callbacks.onSaveManualSlot();
-        this.showSavedGamesModal();
-      });
-
-    this.modalEl.querySelectorAll('[data-load-slot]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const slot = (btn as HTMLElement).getAttribute('data-load-slot') as
-          | 'manual'
-          | 'auto';
-        this.hideAll();
-        this.callbacks.onLoadSavedBattle(slot);
-      });
-    });
-  }
-
   public showCreditsModal(): void {
     this.openSubModal();
     this.modalEl.innerHTML = `
@@ -507,6 +568,8 @@ export class MenusManager {
   public showSettingsModal(): void {
     this.openSubModal();
     const s = this.settings.get();
+    const { activeSlot } = this.callbacks.onGetSaveSlotsState();
+
     this.modalEl.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <strong style="font-size:1.15rem;color:var(--accent-gold);">⚙️ Settings & Accessibility</strong>
@@ -556,7 +619,7 @@ export class MenusManager {
         </label>
       </div>
       <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-        <button id="set-save-slot" class="sw-btn">💾 Save Battle Now</button>
+        <button id="set-save-slot" class="sw-btn">💾 Save to Slot ${activeSlot} Now</button>
         <button id="set-done" class="sw-btn sw-btn-primary">Done</button>
       </div>
     `;
@@ -629,7 +692,9 @@ export class MenusManager {
     this.modalEl
       .querySelector('#set-save-slot')
       ?.addEventListener('click', () => {
-        this.callbacks.onSaveManualSlot();
+        const { activeSlot: currentSlot } =
+          this.callbacks.onGetSaveSlotsState();
+        this.callbacks.onSaveToSlot(currentSlot);
         this.closeSubModal();
       });
   }
@@ -642,10 +707,9 @@ export class MenusManager {
         <button id="htp-close" class="sw-btn" style="min-height:34px;">✕</button>
       </div>
       <div class="parchment-card" style="padding:12px;font-size:0.83rem;display:flex;flex-direction:column;gap:8px;line-height:1.4;">
-        <div><strong>1. Upgrade Your Base to Unlock Buildings:</strong> Your <em>Council Walker Base</em> starts at Lv.1 with essential camp buildings. Upgrade the Base to <strong>Lv.2</strong> to unlock the <em>Sling Range, Tannery, Beast Pen, Armory, Research Hall (Lab), and Spirit Totem</em>, and to <strong>Lv.3</strong> to unlock the <em>Machine Workshop and Bronze Smeltery</em>!</div>
-        <div><strong>2. Walk & Stomp:</strong> Select your Council Walker and tap <em>Walk Mode [M]</em> to march across the map, crush forest trees into +25 Wood, and stomp small enemy units & barricades.</div>
-        <div><strong>3. Relocate Your Whole Camp:</strong> Every building has legs! Tap the <em>Camp</em> icon at the bottom and use <em>Relocate Camp</em> to walk all buildings together in formation.</div>
-        <div><strong>4. 5-Second Auto-Heal & Base Alarms:</strong> Any unit or building that avoids damage for 5 seconds regenerates HP automatically. When attacked, Workers grab stocked weapons from the Weapon Station to defend!</div>
+        <div><strong>1. Select & Tap the Floating 📊 Icon:</strong> Tap any unit, machine, or building to select it—a floating <em>📊 Stats</em> button will follow it on screen. Tap that floating icon whenever you want to open its realtime stats, train troops, or upgrade!</div>
+        <div><strong>2. Upgrade Your Base to Unlock Buildings:</strong> Upgrade your Council Walker Base to <strong>Lv.2</strong> to unlock the <em>Sling Range, Tannery, Beast Pen, Armory, Research Hall (Lab), and Spirit Totem</em>, and to <strong>Lv.3</strong> to unlock the <em>Machine Workshop and Bronze Smeltery</em>!</div>
+        <div><strong>3. 3 Save Slots & Auto-Save:</strong> Your game auto-saves every 20 seconds to your active slot (Slot 1 by default) and automatically loads your last saved game when you open the website.</div>
       </div>
       <div style="display:flex;justify-content:flex-end;">
         <button id="htp-done" class="sw-btn sw-btn-primary">Got It</button>

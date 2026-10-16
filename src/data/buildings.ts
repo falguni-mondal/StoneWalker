@@ -1,5 +1,5 @@
 /**
- * STONEWALKER — Building & Walking Base Definitions with Base-Level Unlock Progression
+ * STONEWALKER — Building & Walking Base Definitions with Balanced Base Upgrade Costs
  * Upgrading the Council Walker Base (Lv.1 -> Lv.2 -> Lv.3) unlocks advanced buildings:
  * - Base Lv.1: Hut, Forager Camp, Woodcutter Camp, Quarry, Storage Pit, Barracks, Weapon Station, Lookout
  * - Base Lv.2: Sling Range, Tannery, Beast Pen, Armory, Research Hall (Lab), Spirit Totem
@@ -49,8 +49,8 @@ export const BASE_TIER_STATS: readonly BaseTierStats[] = [
     housingProvided: 20,
     moveSpeed: 2.0,
     buildingCapMultiplier: 1.5,
-    upgradeCost: { wood: 240, stone: 200, hide: 80, bronze: 0 },
-    upgradeTime: 30,
+    upgradeCost: { wood: 220, stone: 180, hide: 0, bronze: 0 },
+    upgradeTime: 25,
   },
   {
     level: 3,
@@ -63,8 +63,8 @@ export const BASE_TIER_STATS: readonly BaseTierStats[] = [
     housingProvided: 30,
     moveSpeed: 2.2,
     buildingCapMultiplier: 2.0,
-    upgradeCost: { wood: 380, stone: 340, hide: 140, bronze: 100 },
-    upgradeTime: 45,
+    upgradeCost: { wood: 340, stone: 300, hide: 80, bronze: 0 },
+    upgradeTime: 35,
   },
 ];
 
