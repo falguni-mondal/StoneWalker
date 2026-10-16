@@ -1,10 +1,9 @@
 /**
  * STONEWALKER — Complete Production Game Coordinator
- * - 3-Slot Save/Load/Erase System: Auto-loads the player's most recent saved battle on startup
- *   and auto-saves every 20 seconds to the active slot (Slot 1 by default, or Slot 2 / 3 if selected).
- * - Floating Selection Follower Button: Selecting any unit, machine, or building shows a floating
- *   "📊 Stats" button that follows it on screen; clicking it opens the event-safe realtime stats popup.
- * - High-Visibility Emerald Green Building Grid Ghost & Living Enemy AI Base Expansion.
+ * - Single-Row Orders Bar with Integrated Selection Controls:
+ *   When troop(s), machine(s), or building(s) are selected, the `📊 Stats` button and
+ *   `✕` (Cancel Selection) button appear right inside the Orders bar on the same row.
+ * - Clicking `📊 Stats` opens/toggles the stats card popup; clicking `✕` cancels the selection.
  */
 
 import * as THREE from 'three';
@@ -162,7 +161,7 @@ export class StonewalkerGame {
   private pendingBuildType: Exclude<BuildingType, 'base'> | null = null;
   private pendingBuildTile: TileCoord = { tx: 20, tz: 20 };
   private relocateCampPending = false;
-  private minimapCollapsed = false; // Open/visible by default
+  private minimapCollapsed = false;
 
   public constructor() {
     const canvas = document.getElementById('game-canvas');
@@ -197,14 +196,6 @@ export class StonewalkerGame {
       this.bus,
       (pos) => this.cameraRig.jumpTo(pos),
     );
-
-    // Initialize floating world-space "📊 Stats" follower button on selected units/buildings
-    this.effects.initSelectionFollowerButton(uiLayer, () => {
-      this.sfx.playTap();
-      this.haptics.tap();
-      this.selectionBar.togglePopup();
-      this.refreshSelectionUI();
-    });
 
     this.hud = new HUD(uiLayer, {
       onRotateCamera: () => {
@@ -697,7 +688,6 @@ export class StonewalkerGame {
 
     this.bindBusEvents();
 
-    // Automatically load the player's most recent saved battle on startup if one exists
     const mostRecentSave = this.saveSystem.loadMostRecentBattle();
     if (mostRecentSave) {
       this.restoreFromSnapshot(mostRecentSave);
@@ -730,6 +720,11 @@ export class StonewalkerGame {
     this.loop.start();
   }
 
+  /**
+   * Builds the Bottom HUD Stack.
+   * The Orders Bar includes `#btn-order-stats` (📊 Stats) and `#btn-order-deselect` (✕)
+   * on the exact same single row, appearing whenever any unit/machine/building is selected.
+   */
   private buildStackedBottomDock(uiLayer: HTMLElement): {
     bottomStack: HTMLElement;
     ordersBar: HTMLElement;
@@ -744,7 +739,7 @@ export class StonewalkerGame {
       display: flex;
       flex-direction: column;
       align-items: flex-start;
-      gap: 6px;
+      gap: 5px;
       z-index: 22;
       pointer-events: none;
     `;
@@ -768,6 +763,15 @@ export class StonewalkerGame {
       <button id="btn-toggle-map" class="sw-btn sw-btn-primary sw-icon-btn" title="Toggle World Radar Map">
         <svg viewBox="0 0 24 24" fill="#1f1105"><polygon points="3,6 9,3 15,6 21,3 21,18 15,21 9,18 3,21"/></svg>
         <span id="label-map-toggle" class="icon-btn-sub">Map:ON</span>
+      </button>
+      <button id="btn-order-stats" class="sw-btn sw-btn-success sw-icon-btn" style="display:none;" title="Open / Hide Selected Stats Card">
+        <svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="13" width="4" height="8" rx="1"/><rect x="10" y="9" width="4" height="12" rx="1"/><rect x="16" y="4" width="4" height="17" rx="1"/></svg>
+        <span id="label-order-stats" class="icon-btn-sub">Stats</span>
+        <span id="badge-selected-count" class="icon-btn-badge" style="display:none;">1</span>
+      </button>
+      <button id="btn-order-deselect" class="sw-btn sw-btn-danger sw-icon-btn" style="display:none;" title="Cancel Selection">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+        <span class="icon-btn-sub">Cancel</span>
       </button>
     `;
 
@@ -948,6 +952,35 @@ export class StonewalkerGame {
         const isVisible = !this.minimapCollapsed;
         if (lbl) lbl.textContent = isVisible ? 'Map:ON' : 'Map:OFF';
         btn.classList.toggle('sw-btn-primary', isVisible);
+      });
+
+    // Clicking 📊 Stats inside the Orders bar opens/toggles the stats card popup
+    ordersBar
+      .querySelector('#btn-order-stats')
+      ?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.sfx.playTap();
+        this.haptics.tap();
+        this.buildSheet.close();
+        this.armoryPanel.close();
+        this.powerBar.close();
+        this.techPanel.close();
+        this.selectionBar.togglePopup();
+        this.selectionBar.invalidate();
+        this.refreshSelectionUI();
+      });
+
+    // Clicking ✕ Cancel inside the Orders bar cancels the selection and closes the stats card
+    ordersBar
+      .querySelector('#btn-order-deselect')
+      ?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.sfx.playTap();
+        this.haptics.tap();
+        this.commandResolver.clearSelection();
+        this.selectionBar.setPopupOpen(false);
+        this.effects.clearPathPreview();
+        this.refreshSelectionUI();
       });
 
     return { bottomStack, ordersBar, actionsBar };
@@ -1958,8 +1991,46 @@ export class StonewalkerGame {
     this.refreshSelectionUI();
   }
 
+  /**
+   * Updates the Orders bar's `📊 Stats` and `✕ Cancel` buttons and renders the stats popup
+   * if `this.selectionBar.isPopupOpen()` is true.
+   */
   private refreshSelectionUI(): void {
     const selectedIds = this.commandResolver.getSelectedIds();
+    const hasSelection = selectedIds.length > 0;
+
+    if (!hasSelection) {
+      this.selectionBar.setPopupOpen(false);
+    }
+
+    const statsBtn = document.getElementById(
+      'btn-order-stats',
+    ) as HTMLButtonElement | null;
+    const deselectBtn = document.getElementById(
+      'btn-order-deselect',
+    ) as HTMLButtonElement | null;
+    const countBadge = document.getElementById(
+      'badge-selected-count',
+    ) as HTMLElement | null;
+    const statsLabel = document.getElementById(
+      'label-order-stats',
+    ) as HTMLElement | null;
+
+    if (statsBtn && deselectBtn) {
+      statsBtn.style.display = hasSelection ? 'flex' : 'none';
+      deselectBtn.style.display = hasSelection ? 'flex' : 'none';
+      const isOpen = this.selectionBar.isPopupOpen();
+      statsBtn.classList.toggle('sw-btn-primary', isOpen);
+      statsBtn.classList.toggle('sw-btn-success', !isOpen);
+      if (statsLabel) {
+        statsLabel.textContent = isOpen ? 'Hide' : 'Stats';
+      }
+      if (countBadge) {
+        countBadge.textContent = String(selectedIds.length);
+        countBadge.style.display = selectedIds.length > 1 ? 'flex' : 'none';
+      }
+    }
+
     this.selectionBar.render(
       selectedIds,
       this.units,
@@ -2246,7 +2317,6 @@ export class StonewalkerGame {
       );
     }
 
-    // Auto-save every 20 seconds into the active Save Slot (Slot 1 by default)
     this.autosaveTimer += dt;
     if (this.autosaveTimer >= AUTOSAVE_INTERVAL_SEC) {
       this.autosaveTimer = 0;
@@ -2301,7 +2371,6 @@ export class StonewalkerGame {
         this.fog,
         this.world.heightMap,
         this.cameraRig.camera,
-        this.selectionBar.isPopupOpen(),
       );
     }
 

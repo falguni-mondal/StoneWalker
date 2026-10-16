@@ -1,5 +1,5 @@
 /* ============================================================================
-   STONEWALKER DESIGN SYSTEM — Zero-Waste Mobile Top Bar & Floating Follower Icon
+   STONEWALKER DESIGN SYSTEM — Single-Row Orders Bar with Integrated Stats & Clear
    ============================================================================ */
 
 :root {
@@ -130,11 +130,10 @@ body {
   z-index: 10;
 }
 
-/* Hide in-game HUD & follower button while Welcome Screen is active */
+/* Hide in-game HUD while Welcome Screen is active */
 #ui-layer.welcome-active .top-hud-wrapper,
 #ui-layer.welcome-active .bottom-hud-stack,
 #ui-layer.welcome-active .selection-card-dock,
-#ui-layer.welcome-active .world-selection-follower-btn,
 #ui-layer.welcome-active > aside {
   display: none !important;
 }
@@ -150,26 +149,6 @@ body {
 
 #damage-overlay.active {
   box-shadow: inset 0 0 65px 18px rgba(217, 67, 54, 0.85);
-}
-
-/* ============================================================================
-   FLOATING WORLD-SPACE FOLLOWER ICON BUTTON (OPENS REALTIME STATS POPUP)
-   ============================================================================ */
-
-.world-selection-follower-btn {
-  position: fixed;
-  transform: translate(-50%, -50%);
-  min-height: 32px !important;
-  min-width: 64px !important;
-  padding: 4px 10px !important;
-  border-radius: 999px !important;
-  font-size: 0.74rem !important;
-  font-weight: 900 !important;
-  z-index: 24;
-  box-shadow:
-    0 4px 12px rgba(0, 0, 0, 0.65),
-    0 0 0 2px #fff3d1 !important;
-  pointer-events: auto;
 }
 
 /* ============================================================================
@@ -602,7 +581,7 @@ body {
 }
 
 /* ============================================================================
-   UNIFIED NON-OVERLAPPING STACKED BOTTOM DOCK
+   UNIFIED NON-OVERLAPPING STACKED BOTTOM DOCK (SINGLE-ROW ORDERS BAR)
    ============================================================================ */
 
 .bottom-hud-stack {
@@ -612,9 +591,10 @@ body {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 6px;
+  gap: 5px;
   z-index: 22;
   pointer-events: none;
+  max-width: calc(100vw - 16px);
 }
 
 .minimap-translucent {
@@ -640,24 +620,28 @@ body {
   pointer-events: auto;
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px;
-  border-radius: 14px;
-  background: rgba(28, 21, 16, 0.86);
+  flex-wrap: nowrap;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 13px;
+  background: rgba(28, 21, 16, 0.88);
   border: 1.5px solid var(--border-stone);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.52);
   backdrop-filter: blur(8px);
+  max-width: calc(100vw - 16px);
+  overflow-x: auto;
 }
 
 .sw-icon-btn {
   pointer-events: auto;
   position: relative;
-  width: calc(46px * var(--ui-scale));
-  height: calc(46px * var(--ui-scale));
-  min-width: calc(46px * var(--ui-scale));
-  min-height: calc(46px * var(--ui-scale));
-  padding: 3px;
-  border-radius: 10px;
+  flex: 0 0 auto;
+  width: calc(43px * var(--ui-scale));
+  height: calc(43px * var(--ui-scale));
+  min-width: calc(43px * var(--ui-scale));
+  min-height: calc(43px * var(--ui-scale));
+  padding: 2px;
+  border-radius: 9px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -666,17 +650,17 @@ body {
 }
 
 .sw-icon-btn svg {
-  width: 19px;
-  height: 19px;
+  width: 18px;
+  height: 18px;
   flex-shrink: 0;
 }
 
 .icon-btn-sub {
-  font-size: 0.56rem;
+  font-size: 0.54rem;
   font-weight: 900;
   line-height: 1;
   letter-spacing: -0.01em;
-  max-width: 42px;
+  max-width: 40px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -684,15 +668,15 @@ body {
 
 .icon-btn-badge {
   position: absolute;
-  top: -4px;
-  right: -4px;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
   border-radius: 999px;
   background: var(--accent-primary);
   color: #1a0f05;
-  font-size: 0.6rem;
+  font-size: 0.58rem;
   font-weight: 900;
   display: flex;
   align-items: center;
@@ -700,6 +684,7 @@ body {
   border: 1.5px solid #1d1611;
 }
 
+/* Realtime Stats & Orders Card Popup */
 .selection-card-dock {
   position: fixed;
   bottom: calc(var(--safe-bottom) + 8px);
@@ -708,25 +693,26 @@ body {
   transform: none;
   width: min(430px, calc(100vw - 360px));
   min-width: 280px;
-  max-height: 54dvh;
+  max-height: 58dvh;
   overflow-y: auto;
-  padding: 9px 12px;
+  padding: 10px 12px;
   display: none;
   flex-direction: column;
   gap: 6px;
-  z-index: 26;
-  border-color: var(--border-gold);
+  z-index: 35;
+  border: 2px solid var(--border-gold);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.75);
 }
 
-@media (max-width: 740px) {
+@media (max-width: 760px) {
   .selection-card-dock {
-    top: calc(var(--safe-top) + 84px);
-    bottom: auto;
+    bottom: calc(var(--safe-bottom) + 116px);
+    top: auto;
     left: 50%;
     right: auto;
     transform: translateX(-50%);
     width: min(440px, 95vw);
-    max-height: 44dvh;
+    max-height: 52dvh;
   }
 }
 

@@ -1,9 +1,5 @@
 /**
- * STONEWALKER — High-Visibility Green Building Grid Ghost & Floating Selection Follower Button
- * - Upgrades building placement ghost to a vivid emerald green (`0x22c55e`) with individual
- *   grid cell lines so players clearly see every tile covered by the footprint.
- * - Renders a floating world-space "📊 Stats & Orders" icon button that follows selected
- *   troop(s), machine(s), or building(s); clicking it opens the realtime stats popup.
+ * STONEWALKER — High-Visibility Green Building Grid Ghost & World-Space Health Bars
  */
 
 import * as THREE from 'three';
@@ -45,7 +41,6 @@ export class EffectsManager {
   private readonly powerZoneGroup = new THREE.Group();
   private readonly landmarkGroup = new THREE.Group();
 
-  // High-visibility green placement ghost + grid lines
   private readonly ghostGroup = new THREE.Group();
   private readonly ghostMesh: THREE.Mesh;
   private readonly ghostWireframe: THREE.LineSegments;
@@ -55,7 +50,6 @@ export class EffectsManager {
   private readonly dustPool: DustParticle[] = [];
   private readonly floatingTexts: FloatingTextItem[] = [];
   private readonly hpBarElements = new Map<EntityId, HTMLElement>();
-  private selectionActionBtn: HTMLButtonElement | null = null;
 
   private readonly ringGeo = new THREE.RingGeometry(0.62, 0.88, 28);
   private readonly ringMat = new THREE.MeshBasicMaterial({
@@ -87,7 +81,6 @@ export class EffectsManager {
     this.settings = settings;
     this.ringGeo.rotateX(-Math.PI / 2);
 
-    // Vivid emerald green placement block + crisp grid border
     const boxGeo = new THREE.BoxGeometry(1, 0.45, 1);
     this.ghostMesh = new THREE.Mesh(
       boxGeo,
@@ -128,35 +121,6 @@ export class EffectsManager {
     );
   }
 
-  /**
-   * Initializes the floating follower icon button that tracks selected units/buildings
-   * and opens the realtime stats popup when clicked.
-   */
-  public initSelectionFollowerButton(
-    uiLayer: HTMLElement,
-    onToggleStatsPopup: () => void,
-  ): void {
-    if (this.selectionActionBtn) {
-      return;
-    }
-    const btn = document.createElement('button');
-    btn.className = 'sw-btn sw-btn-primary world-selection-follower-btn';
-    btn.title = 'Open Realtime Stats & Orders';
-    btn.innerHTML = `<span>📊</span><span id="follower-btn-label">Stats</span>`;
-    btn.style.display = 'none';
-
-    btn.addEventListener('pointerdown', (e) => {
-      e.stopPropagation();
-    });
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      onToggleStatsPopup();
-    });
-
-    uiLayer.appendChild(btn);
-    this.selectionActionBtn = btn;
-  }
-
   public syncSelectionRings(
     selectedItems: ReadonlyArray<{ position: Vec2; radius: number }>,
     heightMap: HeightMap,
@@ -174,10 +138,6 @@ export class EffectsManager {
     }
   }
 
-  /**
-   * Updates World-Space Health Bars AND positions the floating follower button
-   * right next to the selected troop(s), machine(s), or building(s).
-   */
   public syncWorldHealthBars(
     units: ReadonlyMap<EntityId, UnitEntity>,
     buildings: ReadonlyMap<EntityId, BuildingEntity>,
@@ -185,7 +145,6 @@ export class EffectsManager {
     fog: FogOfWar,
     heightMap: HeightMap,
     camera: THREE.Camera,
-    isPopupOpen: boolean = false,
   ): void {
     const overlay = document.getElementById('damage-overlay');
     if (!overlay) return;
@@ -256,23 +215,9 @@ export class EffectsManager {
       }
     };
 
-    let sumX = 0;
-    let sumZ = 0;
-    let maxYOffset = 2.0;
-    let validSelectedCount = 0;
-
     for (const u of units.values()) {
       if (u.hp <= 0 || u.isReviving) continue;
       const isSelected = selectedSet.has(u.id);
-      if (isSelected) {
-        sumX += u.position.x;
-        sumZ += u.position.z;
-        maxYOffset = Math.max(
-          maxYOffset,
-          u.kind === 'machine' ? 2.5 : u.kind === 'hero' ? 2.4 : 1.9,
-        );
-        validSelectedCount++;
-      }
       const isDamaged = u.hp < u.maxHp;
       if (
         !isSelected &&
@@ -309,15 +254,6 @@ export class EffectsManager {
     for (const b of buildings.values()) {
       if (b.hp <= 0) continue;
       const isSelected = selectedSet.has(b.id);
-      if (isSelected) {
-        sumX += b.position.x;
-        sumZ += b.position.z;
-        maxYOffset = Math.max(
-          maxYOffset,
-          b.buildingType === 'base' ? 4.8 : 3.1,
-        );
-        validSelectedCount++;
-      }
       const isDamaged = b.hp < b.maxHp || !b.isConstructed;
       if (!isSelected && !isDamaged) continue;
       if (b.faction !== 'player' && !fog.isPositionExplored(b.position)) {
@@ -347,48 +283,6 @@ export class EffectsManager {
         this.hpBarElements.delete(id);
       }
     }
-
-    // Position the Floating Follower Icon Button around the selected entity/group
-    if (this.selectionActionBtn) {
-      if (validSelectedCount === 0) {
-        this.selectionActionBtn.style.display = 'none';
-      } else {
-        const avgX = sumX / validSelectedCount;
-        const avgZ = sumZ / validSelectedCount;
-        const h = heightMap.getInterpolatedHeight(avgX, avgZ);
-        projVec.set(avgX, h + maxYOffset + 0.45, avgZ);
-        projVec.project(camera);
-
-        if (projVec.z > 1) {
-          this.selectionActionBtn.style.display = 'none';
-        } else {
-          const rawX = (projVec.x * 0.5 + 0.5) * window.innerWidth + 34;
-          const rawY = (-projVec.y * 0.5 + 0.5) * window.innerHeight - 12;
-          const clampedX = Math.max(
-            48,
-            Math.min(window.innerWidth - 64, rawX),
-          );
-          const clampedY = Math.max(
-            58,
-            Math.min(window.innerHeight - 90, rawY),
-          );
-
-          this.selectionActionBtn.style.display = 'inline-flex';
-          this.selectionActionBtn.style.left = `${clampedX}px`;
-          this.selectionActionBtn.style.top = `${clampedY}px`;
-          const lbl = this.selectionActionBtn.querySelector(
-            '#follower-btn-label',
-          );
-          if (lbl) {
-            lbl.textContent = isPopupOpen
-              ? 'Hide'
-              : validSelectedCount > 1
-                ? `Stats (${validSelectedCount})`
-                : 'Stats';
-          }
-        }
-      }
-    }
   }
 
   public showPathPreview(
@@ -415,9 +309,6 @@ export class EffectsManager {
     this.pathPreviewGroup.clear();
   }
 
-  /**
-   * Renders a high-visibility green grid placeholder showing the exact tiles covered.
-   */
   public updatePlacementGhost(
     visible: boolean,
     position: Vec2,
@@ -452,7 +343,7 @@ export class EffectsManager {
     const mat = this.ghostMesh.material as THREE.MeshBasicMaterial;
     const wireMat = this.ghostWireframe.material as THREE.LineBasicMaterial;
     if (isValid) {
-      mat.color.setHex(0x22c55e); // Vivid bright emerald green
+      mat.color.setHex(0x22c55e);
       mat.opacity = 0.82;
       wireMat.color.setHex(0xd9ffcb);
     } else {
