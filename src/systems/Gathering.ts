@@ -1,5 +1,14 @@
 /**
- * STONEWALKER — Resource Gathering, Drop-Off & Passive Loot Trickle System (Section 7)
+ * ============================================================================
+ * ⛏️🌾 STONEWALKER — RESOURCE GATHERING & PASSIVE LOOT SYSTEM
+ * ============================================================================
+ * How Player vs. Enemy Gathering Works:
+ * 1. 🛡️ PLAYER uses `BALANCE.PLAYER_ECONOMY` at 100% full strength.
+ * 2. 👹 ENEMY AI uses `BALANCE.ENEMY_ECONOMY` scaled by `BALANCE.AI_DIFFICULTY[difficulty].gatherMultiplier`:
+ *      - Easy:   0.75x Enemy Gather Speed & Passive Loot
+ *      - Normal: 1.00x Enemy Gather Speed & Passive Loot (Matches your ENEMY_ECONOMY numbers)
+ *      - Hard:   1.25x Enemy Gather Speed & Passive Loot
+ * ============================================================================
  */
 
 import { BALANCE } from '../data/balance';
@@ -16,8 +25,22 @@ import type { ResourceManager } from '../world/Resources';
 import { Pathfinder } from './Pathfinding';
 
 export class GatheringSystem {
+  /**
+   * Returns `PLAYER_ECONOMY` for the player or `ENEMY_ECONOMY` for AI factions.
+   */
+  private static getEconomyConfig(factionState: FactionState) {
+    return factionState.faction === 'player'
+      ? BALANCE.PLAYER_ECONOMY
+      : BALANCE.ENEMY_ECONOMY;
+  }
+
+  /**
+   * 🎒 Calculates how many resources a Worker can carry before returning to a drop-off.
+   * Controlled by `WORKER_CARRY_CAPACITY` in `balance.ts` + researched basket/harness techs.
+   */
   public static getWorkerCarryCapacity(factionState: FactionState): number {
-    let cap = BALANCE.WORKER_CARRY_CAPACITY;
+    const econ = this.getEconomyConfig(factionState);
+    let cap = econ.WORKER_CARRY_CAPACITY;
     for (const techId of factionState.researchedTechs) {
       const tech = TECHS[techId];
       if (tech && tech.effect.type === 'carry_capacity') {
@@ -27,18 +50,22 @@ export class GatheringSystem {
     return cap;
   }
 
+  /**
+   * ⚡ Calculates the Worker harvest speed multiplier from researched techs, relics,
+   * and (for enemies) the active AI difficulty multiplier passed via `externalMultiplier`.
+   */
   public static getFactionGatherSpeedMultiplier(
     factionState: FactionState,
-    relicMultiplier: number = 1.0,
+    externalMultiplier: number = 1.0,
   ): number {
-    let mult = 1.0;
+    let techMult = 1.0;
     for (const techId of factionState.researchedTechs) {
       const tech = TECHS[techId];
       if (tech && tech.effect.type === 'gather_speed') {
-        mult += tech.effect.value;
+        techMult += tech.effect.value;
       }
     }
-    return mult * relicMultiplier;
+    return techMult * externalMultiplier;
   }
 
   public static findNearestDropOff(
@@ -73,13 +100,18 @@ export class GatheringSystem {
     return best;
   }
 
+  /**
+   * ⛏️ Runs every simulation tick for each Worker assigned to gather resources.
+   * - Uses `PLAYER_ECONOMY.WORKER_GATHER_RATE_PER_SEC` (2.6/s) for Player Workers.
+   * - Uses `ENEMY_ECONOMY.WORKER_GATHER_RATE_PER_SEC` (2.3/s) * Difficulty Multiplier for Enemy Workers.
+   */
   public static updateWorkerGathering(
     worker: UnitEntity,
     factionState: FactionState,
     buildings: Iterable<BuildingEntity>,
     resources: ResourceManager,
     grid: WorldGrid,
-    relicGatherMultiplier: number,
+    externalGatherMultiplier: number,
     dt: number,
   ): void {
     if (
@@ -90,8 +122,10 @@ export class GatheringSystem {
       return;
     }
 
+    const econ = this.getEconomyConfig(factionState);
     const carryCap = this.getWorkerCarryCapacity(factionState);
 
+    // 1. Backpack is full -> Walk to nearest Drop-Off Building and deposit resources
     if (worker.carryAmount >= carryCap && worker.carryResourceType) {
       const dropOff = this.findNearestDropOff(
         worker,
@@ -126,6 +160,7 @@ export class GatheringSystem {
       return;
     }
 
+    // 2. Locate target Resource Node (or find nearest replacement of the same type)
     let node = worker.jobMemory.targetEntityId
       ? resources.getNode(worker.jobMemory.targetEntityId)
       : undefined;
@@ -143,34 +178,6 @@ export class GatheringSystem {
         worker.jobMemory.targetPosition = { ...replacement.position };
         worker.targetEntityId = replacement.id;
       } else {
-        if (worker.carryAmount > 0 && worker.carryResourceType) {
-          const dropOff = this.findNearestDropOff(
-            worker,
-            worker.carryResourceType,
-            buildings,
-          );
-          if (dropOff) {
-            const dist = Math.hypot(
-              dropOff.position.x - worker.position.x,
-              dropOff.position.z - worker.position.z,
-            );
-            if (dist <= dropOff.footprint * 0.5 + 1.4) {
-              const rType = worker.carryResourceType;
-              factionState.resources[rType] = Math.min(
-                factionState.storageCaps[rType],
-                factionState.resources[rType] + worker.carryAmount,
-              );
-              worker.carryAmount = 0;
-            } else if (worker.path.length === 0) {
-              worker.path = Pathfinder.findPath(
-                grid,
-                worker.position,
-                dropOff.position,
-              );
-            }
-            return;
-          }
-        }
         worker.jobMemory.jobType = 'none';
         worker.status = 'idle';
         return;
@@ -182,6 +189,7 @@ export class GatheringSystem {
       node.position.z - worker.position.z,
     );
 
+    // 3. Harvest from the Node
     if (distToNode <= 1.85) {
       worker.path = [];
       worker.status = 'working';
@@ -200,17 +208,18 @@ export class GatheringSystem {
         node.resourceType,
         buildings,
       )
-        ? BALANCE.CAMP_PROXIMITY_GATHER_BONUS
+        ? econ.CAMP_PROXIMITY_GATHER_BONUS
         : 1.0;
+
       const speedMult =
         this.getFactionGatherSpeedMultiplier(
           factionState,
-          relicGatherMultiplier,
+          externalGatherMultiplier,
         ) * campBonus;
 
       const amountToGather = Math.min(
         carryCap - worker.carryAmount,
-        BALANCE.WORKER_GATHER_RATE_PER_SEC * speedMult * dt,
+        econ.WORKER_GATHER_RATE_PER_SEC * speedMult * dt,
       );
       const res = resources.harvestFromNode(node.id, amountToGather, grid);
       worker.carryAmount += res.harvested;
@@ -222,18 +231,26 @@ export class GatheringSystem {
 
   /**
    * 💰🎁 PASSIVE LOOT & CAMP YIELD GENERATION
-   * Automatically increases gathered resources little by little every second so that
-   * even if all Workers die, the player can always afford to train new Workers or Army!
-   * -> To change the loot values, edit `BALANCE.PASSIVE_LOOT_PER_SEC` in `src/data/balance.ts`
-   *    or change `LOOT_SPEED_MULTIPLIER` right below!
+   * - For the Player: Uses `BALANCE.PLAYER_ECONOMY.PASSIVE_LOOT_PER_SEC` and `CAMP_PASSIVE_YIELD_MULTIPLIER`.
+   * - For Enemy AI: Uses `BALANCE.ENEMY_ECONOMY.PASSIVE_LOOT_PER_SEC` and `CAMP_PASSIVE_YIELD_MULTIPLIER`,
+   *   automatically multiplied by `BALANCE.AI_DIFFICULTY[aiDifficulty].gatherMultiplier`!
    */
   public static updatePassiveBuildingYields(
     factionState: FactionState,
     buildings: Iterable<BuildingEntity>,
     dt: number,
+    aiDifficulty: 'easy' | 'normal' | 'hard' = 'normal',
   ): void {
-    // 💰🎁 CHANGE THIS MULTIPLIER (e.g. 1.0, 2.5, 5.0) TO SCALE AUTOMATIC LOOT GAIN!
-    const LOOT_SPEED_MULTIPLIER = 2.0;
+    const isPlayer = factionState.faction === 'player';
+    const econ = this.getEconomyConfig(factionState);
+
+    // 🎚️ Scale Enemy passive income by Difficulty (Easy = 0.75x, Normal = 1.0x, Hard = 1.25x)
+    const difficultyScale = isPlayer
+      ? 1.0
+      : BALANCE.AI_DIFFICULTY[aiDifficulty].gatherMultiplier;
+
+    const loot = econ.PASSIVE_LOOT_PER_SEC;
+    const campMult = econ.CAMP_PASSIVE_YIELD_MULTIPLIER * difficultyScale;
 
     for (const bld of buildings) {
       if (
@@ -244,30 +261,27 @@ export class GatheringSystem {
         continue;
       }
 
-      // 🏰 Council Walker Base provides steady automatic loot for all resources
+      // 🏰 Council Walker Base passive resource trickle
       if (bld.buildingType === 'base') {
-        const loot = BALANCE.PASSIVE_LOOT_PER_SEC;
         factionState.resources.food = Math.min(
           factionState.storageCaps.food,
-          factionState.resources.food + loot.food * LOOT_SPEED_MULTIPLIER * dt,
+          factionState.resources.food + loot.food * difficultyScale * dt,
         );
         factionState.resources.wood = Math.min(
           factionState.storageCaps.wood,
-          factionState.resources.wood + loot.wood * LOOT_SPEED_MULTIPLIER * dt,
+          factionState.resources.wood + loot.wood * difficultyScale * dt,
         );
         factionState.resources.stone = Math.min(
           factionState.storageCaps.stone,
-          factionState.resources.stone +
-            loot.stone * LOOT_SPEED_MULTIPLIER * dt,
+          factionState.resources.stone + loot.stone * difficultyScale * dt,
         );
         factionState.resources.hide = Math.min(
           factionState.storageCaps.hide,
-          factionState.resources.hide + loot.hide * LOOT_SPEED_MULTIPLIER * dt,
+          factionState.resources.hide + loot.hide * difficultyScale * dt,
         );
         factionState.resources.bronze = Math.min(
           factionState.storageCaps.bronze,
-          factionState.resources.bronze +
-            loot.bronze * LOOT_SPEED_MULTIPLIER * dt,
+          factionState.resources.bronze + loot.bronze * difficultyScale * dt,
         );
       }
 
@@ -275,31 +289,31 @@ export class GatheringSystem {
         continue;
       }
 
-      // 🏕️ Resource Camps add extra passive income while planted in Stand Mode
+      // 🏕️ Planted Camp passive resource income (scales with Building Level 1..3)
       if (bld.buildingType === 'tannery') {
         factionState.resources.hide = Math.min(
           factionState.storageCaps.hide,
-          factionState.resources.hide + 0.85 * bld.level * dt,
+          factionState.resources.hide + 0.85 * bld.level * campMult * dt,
         );
       } else if (bld.buildingType === 'forager_camp') {
         factionState.resources.food = Math.min(
           factionState.storageCaps.food,
-          factionState.resources.food + 0.9 * bld.level * dt,
+          factionState.resources.food + 0.9 * bld.level * campMult * dt,
         );
       } else if (bld.buildingType === 'woodcutter_camp') {
         factionState.resources.wood = Math.min(
           factionState.storageCaps.wood,
-          factionState.resources.wood + 0.9 * bld.level * dt,
+          factionState.resources.wood + 0.9 * bld.level * campMult * dt,
         );
       } else if (bld.buildingType === 'quarry') {
         factionState.resources.stone = Math.min(
           factionState.storageCaps.stone,
-          factionState.resources.stone + 0.75 * bld.level * dt,
+          factionState.resources.stone + 0.75 * bld.level * campMult * dt,
         );
       } else if (bld.buildingType === 'bronze_mine') {
         factionState.resources.bronze = Math.min(
           factionState.storageCaps.bronze,
-          factionState.resources.bronze + 0.65 * bld.level * dt,
+          factionState.resources.bronze + 0.65 * bld.level * campMult * dt,
         );
       }
     }

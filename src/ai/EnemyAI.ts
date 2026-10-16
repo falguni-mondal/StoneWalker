@@ -1,10 +1,11 @@
 /**
- * STONEWALKER — Living Enemy AI with Base Expansion & Tribe-Distinct Armies (Section 12)
- * - Actively expands its camp by constructing new buildings and upgrading its Base (Lv.1 -> 2 -> 3).
- * - Each tribe trains its own distinct signature roster of troops and war machines:
- *   * `stonebacks`: Bone Clubbers, Shield Bearers, Boulder Throwers, Shell Walkers, Mammoth Fortresses
- *   * `reef_clan`:  Flint Spearmen, Raptor Scouts, Bow Hunters, Bone Shamans, Raider Carts
- *   * `ember_tribe`: Stone Slingers, Bow Hunters, Bone Rams, Fire Catapults, Titan Walkers
+ * STONEWALKER — Fair, Paced Enemy AI Controller (Section 12)
+ * - Strictly obeys Base-Level progression:
+ *   * Base Lv.1: Basic Stone Age troops only (Clubbers, Spearmen, Slingers).
+ *   * Base Lv.2: Unlocks Tier-2 troops (Shield Bearers, Bow Hunters, Scouts).
+ *   * Base Lv.3 + Constructed Machine Workshop: Unlocks War Machines (and only after the
+ *     player has also reached Base Lv.3).
+ * - Zero resource cheating: AI must legitimately afford every unit and building.
  */
 
 import type { EventBus } from '../core/EventBus';
@@ -24,6 +25,7 @@ import type {
 } from '../data/types';
 import { setBaseMode } from '../entities/Base';
 import { createBuildingEntity } from '../entities/Building';
+import { ConstructionSystem } from '../systems/Construction';
 import { Pathfinder } from '../systems/Pathfinding';
 import { ProductionSystem } from '../systems/Production';
 import type { WorldGrid } from '../world/Grid';
@@ -37,9 +39,9 @@ export type EnemyAIStateName =
 
 interface TribeMilitaryProfile {
   buildOrder: ReadonlyArray<Exclude<BuildingType, 'base'>>;
-  troopPool: ReadonlyArray<Exclude<UnitRole, 'worker'>>;
+  tier1Troops: ReadonlyArray<Exclude<UnitRole, 'worker'>>;
+  tier2Troops: ReadonlyArray<Exclude<UnitRole, 'worker'>>;
   machinePool: ReadonlyArray<Exclude<MachineRole, 'crawler'>>;
-  unlockTechs: readonly string[];
 }
 
 export const TRIBE_MILITARY_PROFILES: Record<TribeId, TribeMilitaryProfile> = {
@@ -49,58 +51,38 @@ export const TRIBE_MILITARY_PROFILES: Record<TribeId, TribeMilitaryProfile> = {
       'quarry',
       'barracks',
       'armory',
-      'machine_workshop',
       'lookout',
+      'machine_workshop',
     ],
-    troopPool: ['clubber', 'shield_bearer', 'clubber', 'shield_bearer'],
-    machinePool: ['boulder_thrower', 'shell_walker', 'mammoth_fortress'],
-    unlockTechs: [
-      'stone_weaponry',
-      'bone_shields',
-      'wheelwright_craft',
-      'torsion_frames',
-      'carapace_plating',
-      'colossus_engineering',
-    ],
+    tier1Troops: ['clubber', 'spearman'],
+    tier2Troops: ['clubber', 'shield_bearer', 'spearman'],
+    machinePool: ['boulder_thrower', 'shell_walker'],
   },
   reef_clan: {
     buildOrder: [
       'hut',
       'forager_camp',
+      'barracks',
       'sling_range',
       'beast_pen',
       'machine_workshop',
-      'spirit_totem',
     ],
-    troopPool: ['spearman', 'scout', 'bow_hunter', 'shaman'],
+    tier1Troops: ['spearman', 'slinger'],
+    tier2Troops: ['spearman', 'scout', 'bow_hunter'],
     machinePool: ['raider_cart', 'boulder_thrower'],
-    unlockTechs: [
-      'stone_weaponry',
-      'sinew_bows',
-      'spirit_chants',
-      'wheelwright_craft',
-      'torsion_frames',
-    ],
   },
   ember_tribe: {
     buildOrder: [
       'hut',
       'woodcutter_camp',
+      'barracks',
       'sling_range',
-      'machine_workshop',
-      'bronze_mine',
       'armory',
+      'machine_workshop',
     ],
-    troopPool: ['slinger', 'bow_hunter', 'spearman', 'slinger'],
-    machinePool: ['bone_ram', 'fire_catapult', 'titan_walker'],
-    unlockTechs: [
-      'stone_weaponry',
-      'sinew_bows',
-      'wheelwright_craft',
-      'pitch_alchemy',
-      'colossus_engineering',
-      'bronze_titans',
-    ],
+    tier1Troops: ['clubber', 'slinger'],
+    tier2Troops: ['slinger', 'bow_hunter', 'spearman'],
+    machinePool: ['raider_cart', 'bone_ram', 'fire_catapult'],
   },
 };
 
@@ -112,7 +94,7 @@ export class EnemyAIController {
 
   private state: EnemyAIStateName = 'Boom';
   private decisionTimer = 0;
-  private attackCooldownTimer = 45;
+  private attackCooldownTimer = 95;
   private expansionTimer = 0;
   private watchdogTimer = 0;
   private lastKnownMetric = 0;
@@ -130,7 +112,7 @@ export class EnemyAIController {
     this.nightAttacks = params.nightAttacks;
     this.baseWalks = params.baseWalks;
     this.attackCooldownTimer =
-      BALANCE.AI_DIFFICULTY[params.difficulty].attackIntervalSec * 0.7;
+      BALANCE.AI_DIFFICULTY[params.difficulty].attackIntervalSec;
   }
 
   public getStateName(): EnemyAIStateName {
@@ -151,32 +133,12 @@ export class EnemyAIController {
     const diffParams = BALANCE.AI_DIFFICULTY[this.difficulty];
     const profile = TRIBE_MILITARY_PROFILES[factionState.tribe];
 
-    for (const techId of profile.unlockTechs) {
-      if (!factionState.researchedTechs.includes(techId)) {
-        factionState.researchedTechs.push(techId);
-      }
-    }
-
-    if (this.difficulty === 'hard') {
-      factionState.resources.food = Math.min(
-        factionState.storageCaps.food,
-        factionState.resources.food + 1.4 * dt,
-      );
-      factionState.resources.wood = Math.min(
-        factionState.storageCaps.wood,
-        factionState.resources.wood + 1.4 * dt,
-      );
-      factionState.resources.stone = Math.min(
-        factionState.storageCaps.stone,
-        factionState.resources.stone + 1.0 * dt,
-      );
-    }
-
     this.attackCooldownTimer = Math.max(0, this.attackCooldownTimer - dt);
     this.decisionTimer += dt;
     this.expansionTimer += dt;
     this.watchdogTimer += dt;
 
+    // 60-second Watchdog check (resets state if stuck, without granting free resources)
     const currentMetric =
       Math.floor(factionState.resources.food + factionState.resources.wood) +
       factionState.populationUsed * 50 +
@@ -187,9 +149,6 @@ export class EnemyAIController {
     } else if (this.watchdogTimer >= BALANCE.AI_WATCHDOG_TIMEOUT_SECONDS) {
       this.watchdogTimer = 0;
       this.state = 'Boom';
-      factionState.resources.food += 120;
-      factionState.resources.wood += 120;
-      factionState.resources.stone += 90;
     }
 
     if (this.decisionTimer < diffParams.decisionIntervalSec) {
@@ -202,10 +161,20 @@ export class EnemyAIController {
       return;
     }
 
-    if (this.expansionTimer >= 16) {
+    const playerBaseLevel = ConstructionSystem.getFactionBaseLevel(
+      'player',
+      buildings.values(),
+    );
+
+    // Sync AI tech unlocks strictly to the AI's current Base Level
+    this.syncTechsForBaseLevel(factionState, myBase.level);
+
+    // Slow, fair camp expansion (checks every 65 seconds instead of 16 seconds)
+    if (this.expansionTimer >= 65) {
       this.expansionTimer = 0;
       this.tryExpandAndUpgradeBase(
         myBase,
+        playerBaseLevel,
         factionState,
         profile,
         buildings,
@@ -220,13 +189,16 @@ export class EnemyAIController {
     const myWorkers = myUnits.filter((u) => u.role === 'worker');
     const myArmy = myUnits.filter((u) => u.role !== 'worker');
 
+    const maxWorkers =
+      this.difficulty === 'easy' ? 2 : this.difficulty === 'normal' ? 3 : 3;
+
     if (factionState.alarmActive) {
       this.state = 'Defend';
     }
 
     switch (this.state) {
       case 'Boom': {
-        if (myWorkers.length < 4 && myBase.queue.length < 2) {
+        if (myWorkers.length < maxWorkers && myBase.queue.length < 1) {
           ProductionSystem.enqueueUnitOrItem(
             myBase,
             'worker',
@@ -248,8 +220,9 @@ export class EnemyAIController {
 
       case 'BuildArmy': {
         if (myArmy.length < diffParams.targetArmySize) {
-          this.trainTribeSignatureUnit(
+          this.trainFairUnit(
             myBase,
+            playerBaseLevel,
             factionState,
             profile,
             buildings,
@@ -259,9 +232,12 @@ export class EnemyAIController {
 
         const nightReady =
           !this.nightAttacks || isNight || this.attackCooldownTimer <= 0;
+        const minWaveSize = Math.max(
+          3,
+          Math.floor(diffParams.targetArmySize * 0.75),
+        );
         if (
-          myArmy.length >=
-            Math.max(3, Math.floor(diffParams.targetArmySize * 0.6)) &&
+          myArmy.length >= minWaveSize &&
           this.attackCooldownTimer <= 0 &&
           nightReady
         ) {
@@ -276,7 +252,7 @@ export class EnemyAIController {
           this.state = 'Boom';
           break;
         }
-        if (myArmy.length <= 1) {
+        if (myArmy.length <= 2) {
           this.state = 'Retreat';
           break;
         }
@@ -292,7 +268,11 @@ export class EnemyAIController {
           }
         }
 
-        if (this.baseWalks && myBase.hp > myBase.maxHp * 0.55) {
+        if (
+          this.baseWalks &&
+          myBase.level >= 3 &&
+          myBase.hp > myBase.maxHp * 0.7
+        ) {
           setBaseMode(myBase, 'move');
           if (myBase.path.length === 0) {
             myBase.path = Pathfinder.findPath(
@@ -327,27 +307,60 @@ export class EnemyAIController {
     }
   }
 
+  private syncTechsForBaseLevel(
+    factionState: FactionState,
+    baseLevel: number,
+  ): void {
+    const addTech = (id: string): void => {
+      if (!factionState.researchedTechs.includes(id)) {
+        factionState.researchedTechs.push(id);
+      }
+    };
+    if (baseLevel >= 2) {
+      addTech('stone_weaponry');
+      addTech('bone_shields');
+      addTech('sinew_bows');
+    }
+    if (baseLevel >= 3) {
+      addTech('wheelwright_craft');
+      addTech('torsion_frames');
+      addTech('carapace_plating');
+      addTech('pitch_alchemy');
+    }
+  }
+
   private tryExpandAndUpgradeBase(
     myBase: BuildingEntity,
+    playerBaseLevel: number,
     factionState: FactionState,
     profile: TribeMilitaryProfile,
     _buildings: ReadonlyMap<EntityId, BuildingEntity>,
     grid: WorldGrid,
     onSpawnBuilding?: (bld: BuildingEntity) => void,
   ): void {
+    // AI never upgrades its Base ahead of the player's Base Level!
     if (
       myBase.level < 3 &&
-      this.buildOrderIndex >= myBase.level * 2 &&
-      factionState.resources.wood >= 200 &&
-      factionState.resources.stone >= 160
+      myBase.level < playerBaseLevel &&
+      this.buildOrderIndex >= myBase.level * 2
     ) {
-      factionState.resources.wood -= 180;
-      factionState.resources.stone -= 140;
-      myBase.level += 1;
-      const tier = BASE_TIER_STATS[myBase.level - 1]!;
-      myBase.maxHp = tier.maxHp;
-      myBase.hp = tier.maxHp;
-      return;
+      const nextTier = BASE_TIER_STATS[myBase.level];
+      if (
+        nextTier &&
+        ConstructionSystem.canAfford(
+          factionState.resources,
+          nextTier.upgradeCost,
+        )
+      ) {
+        ConstructionSystem.spendResources(
+          factionState.resources,
+          nextTier.upgradeCost,
+        );
+        myBase.level += 1;
+        myBase.maxHp = nextTier.maxHp;
+        myBase.hp = nextTier.maxHp;
+        return;
+      }
     }
 
     if (!onSpawnBuilding || this.buildOrderIndex >= profile.buildOrder.length) {
@@ -356,12 +369,13 @@ export class EnemyAIController {
 
     const nextBldType = profile.buildOrder[this.buildOrderIndex]!;
     const def = BUILDINGS[nextBldType];
-    if (
-      factionState.resources.wood < (def.cost.wood ?? 60) ||
-      factionState.resources.stone < (def.cost.stone ?? 30)
-    ) {
-      factionState.resources.wood += 45;
-      factionState.resources.stone += 35;
+
+    // Respect Base-Level building requirements (e.g. Machine Workshop requires Base Lv.3)
+    if ((def.requiredBaseLevel ?? 1) > myBase.level) {
+      return;
+    }
+
+    if (!ConstructionSystem.canAfford(factionState.resources, def.cost)) {
       return;
     }
 
@@ -377,29 +391,23 @@ export class EnemyAIController {
     );
 
     if (grid.canPlaceBuilding(validTile.tx, validTile.tz, def.footprint)) {
-      factionState.resources.wood = Math.max(
-        0,
-        factionState.resources.wood - (def.cost.wood ?? 0),
-      );
-      factionState.resources.stone = Math.max(
-        0,
-        factionState.resources.stone - (def.cost.stone ?? 0),
-      );
+      ConstructionSystem.spendResources(factionState.resources, def.cost);
       const newBld = createBuildingEntity({
         buildingType: nextBldType,
         faction: this.faction,
         tribe: factionState.tribe,
         tile: validTile,
         isConstructed: true,
-        level: myBase.level,
+        level: 1,
       });
       onSpawnBuilding(newBld);
       this.buildOrderIndex += 1;
     }
   }
 
-  private trainTribeSignatureUnit(
+  private trainFairUnit(
     myBase: BuildingEntity,
+    playerBaseLevel: number,
     factionState: FactionState,
     profile: TribeMilitaryProfile,
     buildings: ReadonlyMap<EntityId, BuildingEntity>,
@@ -412,59 +420,47 @@ export class EnemyAIController {
 
     this.trainCycleIndex += 1;
 
+    // Strictly gate War Machines: requires AI Base Lv.3, Player Base Lv.3, AND a built Machine Workshop
     if (
-      this.trainCycleIndex % 4 === 0 &&
-      (workshop || myBase.level >= 2)
+      myBase.level >= 3 &&
+      playerBaseLevel >= 3 &&
+      workshop !== null &&
+      this.trainCycleIndex % 6 === 0 &&
+      workshop.queue.length < 1
     ) {
       const mRole =
         profile.machinePool[
           this.trainCycleIndex % profile.machinePool.length
         ]!;
-      const producer = workshop ?? myBase;
-      if (producer.queue.length < 3) {
-        this.ensureUnitResources(factionState);
-        producer.queue.push({
-          itemType: mRole,
-          progress: 0,
-          totalTime: 18,
-        });
-        return;
-      }
+      ProductionSystem.enqueueUnitOrItem(
+        workshop,
+        mRole,
+        factionState,
+        bus,
+      );
+      return;
     }
 
-    const tRole =
-      profile.troopPool[this.trainCycleIndex % profile.troopPool.length]!;
+    // Choose troop pool based on AI Base Level
+    const pool =
+      myBase.level >= 2 ? profile.tier2Troops : profile.tier1Troops;
+    const tRole = pool[this.trainCycleIndex % pool.length]!;
+
     const producer =
       tRole === 'slinger' || tRole === 'bow_hunter' || tRole === 'shaman'
-        ? (slingRange ?? barracks ?? myBase)
+        ? (slingRange ?? barracks)
         : tRole === 'scout'
-          ? (beastPen ?? barracks ?? myBase)
-          : (barracks ?? myBase);
+          ? (beastPen ?? barracks)
+          : barracks;
 
-    if (producer.queue.length < 3) {
-      this.ensureUnitResources(factionState);
-      if (producer.buildingType === 'base') {
-        producer.queue.push({
-          itemType: tRole,
-          progress: 0,
-          totalTime: 11,
-        });
-      } else {
-        ProductionSystem.enqueueUnitOrItem(
-          producer,
-          tRole,
-          factionState,
-          bus,
-        );
-      }
+    if (producer && producer.queue.length < 2) {
+      ProductionSystem.enqueueUnitOrItem(
+        producer,
+        tRole,
+        factionState,
+        bus,
+      );
     }
-  }
-
-  private ensureUnitResources(factionState: FactionState): void {
-    if (factionState.resources.food < 90) factionState.resources.food += 55;
-    if (factionState.resources.wood < 90) factionState.resources.wood += 55;
-    if (factionState.resources.stone < 70) factionState.resources.stone += 40;
-    if (factionState.resources.hide < 50) factionState.resources.hide += 30;
   }
 
   private findMyBase(
